@@ -1,0 +1,36 @@
+[workspace]
+resolver = "3"
+members = ["crates/ironloop-fc", "crates/ironloop-sim", "crates/ironloop-viz"]
+exclude = ["firmware/mobula6"]
+
+[workspace.package]
+edition = "2024"
+license = "MIT"
+version = "0.1.0"
+
+[workspace.dependencies]
+heapless = "0.9"
+libm = "0.2"
+
+[profile.release]
+opt-level = 3
+debug = false
+codegen-units = 16
+
+# Integer overflow in the firmware core is a bug the DST must see (it panics
+# and fails the seed) rather than silently wrap. The board build is its own
+# workspace and keeps release semantics.
+[profile.release.package.ironloop-fc]
+overflow-checks = true
+
+# Bevy is huge; keep the wasm release build fast to link on a small machine.
+[profile.wasm]
+inherits = "release"
+opt-level = 2
+strip = true
+
+# The simulator is float-heavy; keep `cargo test` fast without --release.
+[profile.dev.package.ironloop-fc]
+opt-level = 3
+[profile.dev.package.ironloop-sim]
+opt-level = 3

@@ -1,0 +1,9 @@
+[package]
+name = "ironloop-sim"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+ironloop-fc = { path = "../ironloop-fc" }
+libm.workspace = true

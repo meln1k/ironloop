@@ -1,0 +1,30 @@
+[package]
+name = "ironloop-mobula6"
+edition = "2024"
+license = "MIT"
+version = "0.1.0"
+description = "IronLoop flight controller board target for the HDZero Mobula6 ECO 2024 (STM32F411CEU6)"
+
+[dependencies]
+ironloop-fc = { path = "../../crates/ironloop-fc" }
+embassy-stm32 = { version = "0.6", features = ["stm32f411ce", "time-driver-tim9", "memory-x", "exti", "rt", "unstable-pac"] }
+embassy-executor = { version = "0.10", features = ["platform-cortex-m", "executor-thread", "executor-interrupt"] }
+embassy-time = { version = "0.5", features = ["tick-hz-1_000_000"] }
+embassy-sync = "0.8"
+embassy-futures = "0.1"
+cortex-m = { version = "0.7", features = ["critical-section-single-core", "inline-asm"] }
+cortex-m-rt = "0.7"
+panic-halt = "1"
+heapless = "0.9"
+static_cell = "2"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+debug = 2
+panic = "abort"
+
+[profile.dev]
+opt-level = "s"
+panic = "abort"

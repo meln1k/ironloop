@@ -1,0 +1,203 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>IronLoop · fly the Mobula6 firmware</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #0d1117; color: #c9d1d9; font: 14px/1.4 system-ui, sans-serif; overflow: hidden; }
+  #wrap { position: fixed; inset: 0; }
+  canvas#bevy { width: 100%; height: 100%; display: block; outline: none; }
+  #loading { position: fixed; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px; background: #0d1117; z-index: 2; }
+  #loading h1 { margin: 0; font-size: 22px; color: #f0f6fc; }
+  #loading p { margin: 0; max-width: 560px; text-align: center; color: #8b949e; }
+  #bar { width: 320px; height: 6px; background: #21262d; border-radius: 3px; overflow: hidden; }
+  #bar > div { height: 100%; width: 0; background: #2f81f7; transition: width .2s; }
+  #err { color: #ff7b72; white-space: pre-wrap; max-width: 80vw; }
+  /* On-screen transmitter */
+  #tx { --g: min(190px, 36vmin); position: fixed; inset: auto 0 0 0; height: 0; z-index: 1; user-select: none; -webkit-user-select: none; }
+  #tx[hidden] { display: none; }
+  .gimbal { position: fixed; bottom: 14px; width: var(--g); height: var(--g); border-radius: 18%;
+    background: radial-gradient(circle, rgba(20,24,30,.55) 0 58%, rgba(20,24,30,.72) 59%);
+    border: 2px solid rgba(255,255,255,.35); box-shadow: 0 4px 18px rgba(0,0,0,.35); touch-action: none; cursor: grab; }
+  .gimbal:active { cursor: grabbing; }
+  .gimbal.on { border-color: #58a6ff; }
+  #gl { left: 14px; } #gr { right: 14px; }
+  .gimbal::before, .gimbal::after { content: ''; position: absolute; background: rgba(255,255,255,.22); pointer-events: none; }
+  .gimbal::before { left: 50%; top: 10%; bottom: 10%; width: 2px; margin-left: -1px; }
+  .gimbal::after { top: 50%; left: 10%; right: 10%; height: 2px; margin-top: -1px; }
+  .knob { position: absolute; width: 30%; height: 30%; left: 35%; top: 35%; border-radius: 50%; pointer-events: none;
+    background: radial-gradient(circle at 35% 30%, #f0f3f6, #8b949e 60%, #484f58); box-shadow: 0 3px 8px rgba(0,0,0,.6); }
+  .glabel { position: absolute; left: 0; right: 0; top: -20px; text-align: center; font: 11px/1 ui-monospace, monospace; color: #e6edf3; text-shadow: 0 1px 2px #000; pointer-events: none; }
+  #mid { position: fixed; bottom: 14px; left: 50%; transform: translateX(-50%); display: flex; flex-direction: column; align-items: center; gap: 6px; }
+  #mid .row { display: flex; gap: 6px; }
+  #tx button { font: 600 13px/1 system-ui, sans-serif; color: #e6edf3; background: rgba(20,24,30,.75); border: 2px solid rgba(255,255,255,.35);
+    border-radius: 10px; padding: 9px 12px; touch-action: manipulation; cursor: pointer; }
+  #arm { min-width: 140px; padding: 14px 18px !important; font-size: 16px !important; letter-spacing: .08em; }
+  #arm.switch { border-color: #d29922; color: #f2cc60; }
+  #arm.armed { background: #b62324; border-color: #ff7b72; color: #fff; }
+  #armmsg { font: 11px/1.2 ui-monospace, monospace; color: #e6edf3; text-shadow: 0 1px 2px #000; max-width: 46vw; text-align: center; min-height: 13px; }
+  #flt.acro { border-color: #a371f7; }
+  #cam.fpv { background: #1f6feb; border-color: #58a6ff; color: #fff; }
+</style>
+</head>
+<body>
+<div id="wrap"><canvas id="bevy" tabindex="0"></canvas></div>
+<div id="tx" hidden>
+  <div class="gimbal" id="gl"><div class="glabel"></div><div class="knob"></div></div>
+  <div class="gimbal" id="gr"><div class="glabel"></div><div class="knob"></div></div>
+  <div id="mid">
+    <div id="armmsg"></div>
+    <button id="arm" title="Arm switch (Space)">ARM</button>
+    <div class="row">
+      <button id="flt" title="Flight mode (M)">ANGLE</button>
+      <button id="txmode" title="Stick layout">Mode 2</button>
+      <button id="cam" title="First-person view from the drone's camera (C cycles all cameras)">FPV</button>
+    </div>
+  </div>
+</div>
+<div id="loading">
+  <h1>IronLoop flight controller</h1>
+  <p>The real firmware (<code>step(state, event) → (state, effects)</code>) running on a simulated
+  HDZero Mobula6 ECO: physics, ESCs, battery sag, IMU noise, ELRS link. Click the canvas, then fly with the keyboard or a gamepad.</p>
+  <div id="bar"><div></div></div>
+  <div id="status">downloading firmware + simulator (≈11 MB)…</div>
+  <div id="err"></div>
+</div>
+<script>
+  // On-screen transmitter. Writes window.__ilIn, which the Bevy app reads
+  // every frame: [roll, pitch, yaw, throttle, then four "being touched"
+  // flags in the same order, arm presses, flight-mode presses, camera
+  // presses]. The app
+  // writes back window.__ilOut = [roll, pitch, yaw, throttle, arm switch,
+  // armed, acro, fpv] and window.__ilStatus, so the knobs and buttons always show
+  // what the firmware receives, from any input device.
+  (() => {
+    const IN = new Float32Array(11);
+    window.__ilIn = IN;
+    const AX = { roll: 0, pitch: 1, yaw: 2, throttle: 3 };
+    let txMode = localStorage.getItem('ilTxMode') === '1' ? 1 : 2;
+    // Mode 2: throttle/yaw left, pitch/roll right. Mode 1 swaps pitch and throttle.
+    const layout = () => txMode === 2
+      ? { gl: { x: 'yaw', y: 'throttle' }, gr: { x: 'roll', y: 'pitch' } }
+      : { gl: { x: 'yaw', y: 'pitch' }, gr: { x: 'roll', y: 'throttle' } };
+    const canvas = document.getElementById('bevy');
+    const out = () => window.__ilOut || [0, 0, 0, 0, 0, 0, 0, 0];
+    const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
+
+    // Each gimbal follows one pointer (mouse or finger; two fingers fly both
+    // sticks). Movement is relative to where the drag started, so touching a
+    // stick never jumps it: self-centering axes start from center, throttle
+    // starts from wherever it was left, like a real ratchet-less throttle.
+    for (const id of ['gl', 'gr']) {
+      const el = document.getElementById(id);
+      let drag = null;
+      el.addEventListener('pointerdown', e => {
+        e.preventDefault();
+        if (drag) return;
+        el.setPointerCapture(e.pointerId);
+        const a = layout()[id];
+        const o = out();
+        drag = { pid: e.pointerId, x0: e.clientX, y0: e.clientY, a,
+                 sx: a.x === 'throttle' ? o[3] * 2 - 1 : 0,
+                 sy: a.y === 'throttle' ? o[3] * 2 - 1 : 0 };
+        el.classList.add('on');
+        move(e);
+      });
+      const move = e => {
+        if (!drag || e.pointerId !== drag.pid) return;
+        const half = el.clientWidth * 0.42;
+        const x = clamp(drag.sx + (e.clientX - drag.x0) / half, -1, 1);
+        const y = clamp(drag.sy - (e.clientY - drag.y0) / half, -1, 1);
+        for (const [name, v] of [[drag.a.x, x], [drag.a.y, y]]) {
+          IN[AX[name]] = name === 'throttle' ? (v + 1) / 2 : v;
+          IN[4 + AX[name]] = 1;
+        }
+      };
+      const end = e => {
+        if (!drag || e.pointerId !== drag.pid) return;
+        IN[4 + AX[drag.a.x]] = 0;
+        IN[4 + AX[drag.a.y]] = 0;
+        drag = null;
+        el.classList.remove('on');
+        canvas.focus();
+      };
+      el.addEventListener('pointermove', move);
+      el.addEventListener('pointerup', end);
+      el.addEventListener('pointercancel', end);
+      el.addEventListener('lostpointercapture', end);
+    }
+
+    // Buttons: act on press, and keep keyboard focus on the canvas.
+    const button = (id, fn) => {
+      const b = document.getElementById(id);
+      b.addEventListener('pointerdown', e => { e.preventDefault(); fn(); });
+      b.addEventListener('click', e => { if (e.detail === 0) fn(); canvas.focus(); });
+    };
+    button('arm', () => { IN[8] += 1; });
+    button('flt', () => { IN[9] += 1; });
+    button('cam', () => { IN[10] += 1; });
+    button('txmode', () => {
+      txMode = txMode === 2 ? 1 : 2;
+      localStorage.setItem('ilTxMode', String(txMode));
+    });
+
+    const gl = document.getElementById('gl'), gr = document.getElementById('gr');
+    const arm = document.getElementById('arm'), flt = document.getElementById('flt');
+    const msg = document.getElementById('armmsg'), txb = document.getElementById('txmode');
+    const cam = document.getElementById('cam');
+    const draw = () => {
+      const o = out(), l = layout();
+      const val = name => name === 'throttle' ? o[3] * 2 - 1 : o[AX[name]];
+      for (const [el, a] of [[gl, l.gl], [gr, l.gr]]) {
+        const k = el.lastElementChild;
+        k.style.transform = `translate(${val(a.x) * 100}%, ${-val(a.y) * 100}%)`;
+        el.firstElementChild.textContent = `${a.y === 'throttle' ? 'THR ' + Math.round(o[3] * 100) + '%' : a.y.toUpperCase()} · ${a.x.toUpperCase()}`;
+      }
+      const sw = o[4] > 0.5, armed = o[5] > 0.5;
+      arm.textContent = armed ? 'ARMED' : sw ? 'ARM ON' : 'ARM';
+      arm.className = armed ? 'armed' : sw ? 'switch' : '';
+      msg.textContent = armed ? '' : (window.__ilStatus || '');
+      flt.textContent = o[6] > 0.5 ? 'ACRO' : 'ANGLE';
+      flt.className = o[6] > 0.5 ? 'acro' : '';
+      txb.textContent = `Mode ${txMode}`;
+      cam.className = o[7] > 0.5 ? 'fpv' : '';
+      cam.textContent = o[7] > 0.5 ? 'FPV ON' : 'FPV';
+      requestAnimationFrame(draw);
+    };
+    requestAnimationFrame(draw);
+  })();
+</script>
+<script type="module">
+  const bar = document.querySelector('#bar > div');
+  const status = document.getElementById('status');
+  async function fetchWithProgress(url) {
+    const res = await fetch(url);
+    if (!res.ok) throw new Error(`${url}: ${res.status}`);
+    const total = Number(res.headers.get('x-uncompressed-length') || res.headers.get('content-length')) || 0;
+    const reader = res.body.getReader();
+    const chunks = []; let got = 0;
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      chunks.push(value); got += value.length;
+      if (total) bar.style.width = Math.min(100, 100 * got / total) + '%';
+    }
+    return new Blob(chunks, { type: 'application/wasm' });
+  }
+  try {
+    const { default: init } = await import('./pkg/ironloop.js');
+    const blob = await fetchWithProgress('./pkg/ironloop_bg.wasm');
+    status.textContent = 'starting…';
+    const url = URL.createObjectURL(blob);
+    setTimeout(() => { document.getElementById('loading').remove(); document.getElementById('tx').hidden = false; document.getElementById('bevy').focus(); }, 300);
+    await init({ module_or_path: url });
+  } catch (e) {
+    // Bevy's winit loop throws a control-flow "exception" by design; ignore it.
+    if (!String(e).includes('Using exceptions for control flow')) {
+      document.getElementById('err').textContent = String(e && e.stack || e);
+    }
+  }
+</script>
+</body>
+</html>

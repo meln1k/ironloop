@@ -1,0 +1,9 @@
+[package]
+name = "ironloop-fc"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+heapless.workspace = true
+libm.workspace = true

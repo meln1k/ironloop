@@ -1,0 +1,21 @@
+[package]
+name = "ironloop-viz"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+ironloop-fc = { path = "../ironloop-fc" }
+ironloop-sim = { path = "../ironloop-sim" }
+bevy = { version = "0.20.1", default-features = false, features = [
+  "std", "default_app", "bevy_winit", "bevy_window", "bevy_render", "bevy_core_pipeline",
+  "bevy_pbr", "bevy_light", "bevy_mesh", "bevy_camera", "bevy_color", "bevy_image",
+  "bevy_shader", "bevy_material", "bevy_ui", "bevy_ui_render", "bevy_text", "default_font",
+  "bevy_gizmos", "bevy_gizmos_render", "webgl2", "keyboard", "bevy_gilrs",
+  "tonemapping_luts", "ktx2", "zstd_rust",
+] }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom = { version = "0.4", features = ["wasm_js"] }
+wasm-bindgen = "0.2"
+js-sys = "0.3"
