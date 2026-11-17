@@ -133,10 +133,11 @@ pub enum Action {
     /// throttle, yaw stick at `yaw`) for `secs`, then roll back upright
     /// and recover.
     InvertedHang { secs: f32, yaw: f32 },
-    /// Acro, open loop: hands off, then a doublet (`amp` of full stick
-    /// one way, then the other, 0.3 s each) on roll, pitch, and yaw in turn,
-    /// then hands off again. Throttle holds altitude. Checks rate tracking
-    /// and that the quad settles without oscillating.
+    /// Open loop: hands off, then a doublet (`amp` of full stick one way,
+    /// then the other, 0.3 s each) on roll, pitch, and yaw in turn, then
+    /// hands off again. Throttle holds altitude. In acro it checks rate
+    /// tracking and that the quad settles without oscillating; in angle
+    /// mode, that each stick tilts the quad as far as the angle limit says.
     StickScript { amp: f32 },
     /// Full throttle in angle mode.
     Punch,
@@ -455,8 +456,9 @@ impl Scenario {
                     let yaw = if r.chance(0.5) { r.range(-1.0, 1.0) } else { 0.0 };
                     (Action::InvertedHang { secs: r.range(0.5, 5.0), yaw }, 10 * s)
                 }
-                7 if mode == FlightMode::Acro => {
-                    // Room below for an open-loop sequence.
+                7 => {
+                    // Room below for an open-loop sequence (acro: rates;
+                    // angle: how far each stick tilts the quad).
                     sc.segments.push(Segment { start_us: t, mode, action: Action::Hover { alt: 6.0 } });
                     t += 4 * s;
                     tags.push("stick-script".into());

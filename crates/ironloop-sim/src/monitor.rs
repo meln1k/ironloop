@@ -92,6 +92,14 @@ pub const REQ_RATE_TAU: f32 = 0.03;
 /// (roll and pitch; yaw has a quarter of the torque authority).
 pub const REQ_RATE_ERR: f32 = 0.35;
 pub const REQ_YAW_RATE_ERR: f32 = 0.5;
+/// Angle mode: full stick commands this tilt (Betaflight's default
+/// angle limit is 55 deg)...
+pub const REQ_ANGLE_LIMIT: f32 = 55.0 * core::f32::consts::PI / 180.0;
+/// ...and in an angle-mode stick script the furthest each 0.3 s stick hold
+/// tilts the quad, averaged over the four roll and pitch holds, is between
+/// these fractions of what the stick commands. (One hold alone varies too
+/// much with wind and small sticks: 0.4-1.4 in seeds 0-299.)
+pub const REQ_ANGLE_REACH: (f32, f32) = (0.75, 1.15);
 /// Hands off in acro the roll and pitch rates settle: RMS below this (rad/s).
 pub const REQ_SETTLED_RMS: f32 = 0.4;
 /// Failsafe hold: thrust within 30% of weight (vertical acceleration m/s²).
@@ -171,6 +179,7 @@ pub const PROPERTIES: &[(&str, &str)] = &[
     ("rate_tracks", "[flight] In an acro stick script each axis tracks the Betaflight-rate setpoint (30 ms lag) within 35% RMS."),
     ("settles", "[flight] Hands off in an acro stick script, roll and pitch rates settle below 0.4 rad/s RMS (no oscillation)."),
     ("sag_compensated", "[flight] On a sagging pack the averaged motor speed matches the throttle stick within 15%."),
+    ("angle_tracks", "[flight] In an angle-mode stick script roll and pitch stick holds tilt the quad 75-115% of the commanded angle on average (55 deg at full stick)."),
 ];
 
 /// Pilot rate (rad/s) for a stick deflection, with the required rates.
@@ -181,10 +190,15 @@ pub fn req_rate(stick: f32) -> f32 {
 }
 
 /// Running checks over one stick-script segment.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 struct ScriptCheck {
     start_us: u64,
+    mode: FlightMode,
     valid: bool,
+    /// Angle mode: per axis (roll, pitch) and stick hold (first, second),
+    /// the furthest the quad tilted the commanded way, as a fraction of the
+    /// commanded angle.
+    reach: [[f32; 2]; 2],
     reference: [f32; 3],
     err2: [f32; 3],
     ref2: [f32; 3],
@@ -902,12 +916,20 @@ impl Monitor {
             self.est_bad_since = None;
         }
 
-        // Stick script: open-loop rate tracking and settling.
+        // Stick script: open-loop rate tracking and settling in acro, how
+        // far each stick tilts the quad in angle mode.
         let seg = sc.segment_at(t).copied();
         let in_script = seg.filter(|g| matches!(g.action, Action::StickScript { .. }));
         if self.script.as_ref().is_some_and(|c| in_script.is_none_or(|g| g.start_us != c.start_us)) {
             let c = self.script.take().unwrap();
-            if c.valid && c.off_script < 0.1 {
+            if c.valid && c.off_script < 0.1 && c.mode == FlightMode::Angle {
+                self.live("angle_tracks");
+                let r = c.reach.iter().flatten().sum::<f32>() / 4.0;
+                if !(REQ_ANGLE_REACH.0..=REQ_ANGLE_REACH.1).contains(&r) {
+                    self.fail(t, "angle_tracks", format!("stick holds reached {:.0}% of the commanded angle on average", r * 100.0));
+                }
+            }
+            if c.valid && c.off_script < 0.1 && c.mode == FlightMode::Acro {
                 for (i, axis) in ["roll", "pitch", "yaw"].iter().enumerate() {
                     if c.ref2[i] > 0.0 {
                         self.live("rate_tracks");
@@ -927,8 +949,19 @@ impl Monitor {
             }
         }
         if let Some(g) = in_script {
-            let c = self.script.get_or_insert(ScriptCheck { start_us: g.start_us, valid: true, ..Default::default() });
-            if !flying || excused || after.failsafe != FailsafeStage::None || after.mode != FlightMode::Acro || alt < 1.0 {
+            let c = self.script.get_or_insert(ScriptCheck {
+                start_us: g.start_us,
+                mode: after.mode,
+                valid: true,
+                reach: [[f32::MIN; 2]; 2],
+                reference: [0.0; 3],
+                err2: [0.0; 3],
+                ref2: [0.0; 3],
+                settle2: 0.0,
+                settle_n: 0,
+                off_script: 0.0,
+            });
+            if !flying || excused || after.failsafe != FailsafeStage::None || after.mode != c.mode || alt < 1.0 {
                 c.valid = false;
             }
             if imu_step && c.valid {
@@ -950,6 +983,14 @@ impl Monitor {
                 let k = (imu_dt / REQ_RATE_TAU).min(1.0);
                 for i in 0..3 {
                     c.reference[i] += (sp[i] - c.reference[i]) * k;
+                }
+                if let Some((axis @ 0..=1, k)) = crate::scenario::stick_script(into) {
+                    // Stick right rolls right; stick forward pitches the
+                    // nose down.
+                    let (roll, pitch, _) = world.body.att.to_euler();
+                    let angle = if axis == 0 { roll } else { -pitch };
+                    let r = &mut c.reach[axis][if k > 0.0 { 0 } else { 1 }];
+                    *r = r.max(angle / (amp * k * REQ_ANGLE_LIMIT));
                 }
                 if let Some((axis, _)) = crate::scenario::stick_script(into) {
                     let e = w[axis] - c.reference[axis];
