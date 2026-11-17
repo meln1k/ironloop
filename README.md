@@ -110,6 +110,7 @@ sag_compensated                [flight] On a sagging pack the averaged motor spe
 - The motor-fault properties need bidirectional-DShot eRPM, which the Mobula6 target does not implement yet; seeds without telemetry skip them.
 - The CRSF parser is unit-tested but not in the DST loop; the simulator delivers decoded channels.
 - Crash detection must never fire in acro, so its hands-off rule (lying still, propped by about 1 g) also needs a filtered jolt above 4 g within 2 s before it: an inverted dive at terminal speed reads exactly like lying on the ground, but never hit anything. A crash without such a jolt, such as a slow tip-over, stops only when the sticks or angle mode demand a roll or pitch the frame does not follow.
+- `crates/ironloop-sim/FAILING_SEEDS.md` lists the seeds that failed a 200,000-seed overnight sweep, by property.
 - The tilt estimate drifts past 15° after some stick slams and long aggressive sequences (22 of seeds 300–1799).
 - The open-loop failsafe landing touches down at 2.5–2.7 m/s in about 1% of seeds (13 of seeds 300–1799), just over the 2.5 m/s limit. The vertical speed estimate from the accelerometer drifts by a m/s or more over a long landing.
 - A few crash and failsafe cases are each seen once in seeds 300–1799: a dead motor not stopped within 4 s (445, `crash_stops`), a bent prop holding altitude in failsafe (1257, `failsafe_descends`), and a touchdown not recognised within 2 s (1762).
