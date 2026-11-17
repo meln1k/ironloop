@@ -16,28 +16,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use ironloop_sim::monitor::PROPERTIES;
-use ironloop_sim::{RunReport, Scenario, Sim, run_seed};
-
-/// Fault kinds the generator injects; each must happen in flight in a sweep.
-const FAULT_KINDS: &[&str] = &[
-    "ImuDropout",
-    "ImuStuck",
-    "ImuGarbage",
-    "Kick",
-    "Impact",
-    "MotorDesync",
-    "MotorDead",
-    "MotorDegraded",
-    "RcLoss",
-    "RcGlitch",
-    "TelemetryLoss",
-    "WindShift",
-    "ClockGlitch",
-    "TimingJitter",
-    "EventDrop",
-    "FcStall",
-    "RebootRequest",
-];
+use ironloop_sim::{FaultKind, RunReport, Scenario, Sim, run_seed};
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -167,7 +146,7 @@ fn main() {
     // Coverage: how many seeds exercised each property and each fault kind
     // in flight, and how much of the simulated time was flying.
     let mut live_seeds: std::collections::BTreeMap<&str, u32> = Default::default();
-    let mut fault_seeds: std::collections::BTreeMap<String, u32> = Default::default();
+    let mut fault_seeds: std::collections::BTreeMap<&str, u32> = Default::default();
     let mut airborne_s = 0.0;
     for r in &reports {
         airborne_s += r.stats.airborne_us as f64 * 1e-6;
@@ -189,12 +168,16 @@ fn main() {
     if gate && airborne_s < 0.25 * sim_s {
         thin.push(format!("airborne only {:.0}% of the time", 100.0 * airborne_s / sim_s));
     }
-    let line: Vec<String> = FAULT_KINDS.iter().map(|k| format!("{k}:{}", fault_seeds.get(*k).copied().unwrap_or(0))).collect();
+    // Every fault kind must happen in flight in a sweep.
+    let line: Vec<String> = FaultKind::ALL.iter().map(|k| format!("{}:{}", k.name(), fault_seeds.get(k.name()).copied().unwrap_or(0))).collect();
     println!("  faults started in flight (seeds): {}", line.join("  "));
-    for k in FAULT_KINDS {
-        if gate && fault_seeds.get(*k).copied().unwrap_or(0) == 0 {
-            thin.push(format!("fault {k} never injected in flight"));
+    for k in FaultKind::ALL {
+        if gate && fault_seeds.get(k.name()).copied().unwrap_or(0) == 0 {
+            thin.push(format!("fault {} never injected in flight", k.name()));
         }
+    }
+    for k in fault_seeds.keys().filter(|k| !FaultKind::ALL.iter().any(|a| a.name() == **k)) {
+        thin.push(format!("fault {k} missing from FaultKind::ALL"));
     }
     let worst_est = reports.iter().map(|r| r.stats.max_est_err_deg).fold(0.0, f32::max);
     let worst_tilt = reports.iter().map(|r| r.stats.max_tilt_angle_mode_deg).fold(0.0, f32::max);

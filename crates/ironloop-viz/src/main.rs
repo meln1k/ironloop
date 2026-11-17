@@ -629,7 +629,7 @@ fn draw(
         .filter(|f| f.active(sim.t_us))
         .map(|f| match f.kind {
             FaultKind::Kick { .. } => "kick".to_string(),
-            k => format!("{k:?}").split([' ', '{']).next().unwrap_or("").to_string(),
+            k => k.name().to_string(),
         })
         .collect();
     let src = match app.replay {

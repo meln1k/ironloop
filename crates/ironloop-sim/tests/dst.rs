@@ -2,7 +2,7 @@
 //! sweeps (`cargo run --release -p ironloop-sim --bin dst -- --seeds 1000`).
 
 use ironloop_fc::FlightMode;
-use ironloop_sim::{Scenario, run_scenario, run_seed};
+use ironloop_sim::{Action, Scenario, run_scenario, run_seed};
 
 #[test]
 fn generated_scenarios_hold_every_property_and_replay_identically() {
@@ -87,7 +87,7 @@ fn motors(sc: Scenario) -> (u64, bool) {
 
 /// No deliberate violent maneuvers, which can end in a chaotic tumble.
 fn calm(s: &Scenario) -> bool {
-    s.faults.is_empty() && !s.unflyable() && !["stick-slam", "flip", "inverted-hang", "drop", "punch"].iter().any(|t| s.name.contains(t))
+    s.faults.is_empty() && !s.unflyable() && !s.segments.iter().any(|g| g.action.is_wild() || g.action == Action::Punch)
 }
 
 #[test]

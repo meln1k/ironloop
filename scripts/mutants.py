@@ -128,20 +128,8 @@ MUTANTS = {
     # The checker itself: a monitor bug that hides real firmware failures.
     "monitor: any fault during a link loss excuses the failsafe checks": [(
         MON,
-        """            window.contains(&t)
-                && matches!(
-                    f.kind,
-                    FaultKind::Kick { .. }
-                        | FaultKind::Impact { .. }
-                        | FaultKind::MotorDesync { .. }
-                        | FaultKind::MotorDegraded { .. }
-                        | FaultKind::ImuDropout
-                        | FaultKind::ImuStuck
-                        | FaultKind::ImuGarbage { .. }
-                )
-        })""",
-        """            window.contains(&t) && !matches!(f.kind, FaultKind::RcLoss | FaultKind::WindShift { .. })
-        }) && Self::excusing_fault(sc, t)""",
+        "Self::excuses(sc, t, |e| e == Excuse::Flight)",
+        "Self::excuses(sc, t, |e| e != Excuse::LinkOrWeather) && Self::excusing_fault(sc, t)",
     )],
 }
 

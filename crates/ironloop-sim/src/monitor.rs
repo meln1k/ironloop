@@ -26,7 +26,7 @@ use ironloop_fc::{
 };
 
 use crate::physics::{MotorHealth, World};
-use crate::scenario::{Action, FaultKind, Scenario};
+use crate::scenario::{Action, Excuse, FaultKind, Scenario};
 
 /// Armed with the link silent this long must be failsafe.
 pub const REQ_FAILSAFE_AFTER_US: u64 = 150_000;
@@ -226,17 +226,13 @@ pub struct Stats {
     /// Steps on which each property's precondition was live.
     pub live: BTreeMap<&'static str, u64>,
     /// Kinds of the faults that started while the quad was airborne.
-    pub faults_in_flight: Vec<String>,
+    pub faults_in_flight: Vec<&'static str>,
 }
 
 /// The physical motor that motor output `i` drives (the build may have two
 /// motor wires swapped, as the simulator wires them).
 fn wired(sc: &Scenario, i: usize) -> usize {
     if sc.motors_swapped { [1, 0, 2, 3][i] } else { i }
-}
-
-pub fn fault_name(k: &FaultKind) -> String {
-    format!("{k:?}").split([' ', '{', '(']).next().unwrap_or("").to_string()
 }
 
 #[derive(Clone, Debug)]
@@ -349,46 +345,24 @@ impl Monitor {
         *self.stats.live.entry(property).or_default() += 1;
     }
 
-    /// Faults that excuse the flight expectations while active (and for a
-    /// recovery window after).
-    fn excusing_fault(sc: &Scenario, t: u64) -> bool {
+    /// A fault excuses what it excuses from just before it starts until 3 s
+    /// after it ends.
+    fn excuses(sc: &Scenario, t: u64, pred: impl Fn(Excuse) -> bool) -> bool {
         sc.faults.iter().any(|f| {
             let window = f.at_us.saturating_sub(100_000)..f.at_us.saturating_add(f.dur_us).saturating_add(3_000_000);
-            window.contains(&t)
-                && matches!(
-                    f.kind,
-                    FaultKind::Kick { .. }
-                        | FaultKind::Impact { .. }
-                        | FaultKind::MotorDesync { .. }
-                        | FaultKind::MotorDegraded { .. }
-                        | FaultKind::ImuDropout
-                        | FaultKind::ImuStuck
-                        | FaultKind::ImuGarbage { .. }
-                        | FaultKind::RcLoss
-                        | FaultKind::WindShift { .. }
-                )
+            window.contains(&t) && pred(f.kind.excuse())
         })
     }
 
-    /// Faults that excuse flight expectations, other than a lost link or
-    /// wind (which the failsafe must cope with on its own). The same fault
-    /// must be both: a fault that excuses nothing (an event drop, say)
-    /// during a link loss excuses nothing either.
-    fn excusing_fault_besides_link(sc: &Scenario, t: u64) -> bool {
-        sc.faults.iter().any(|f| {
-            let window = f.at_us.saturating_sub(100_000)..f.at_us.saturating_add(f.dur_us).saturating_add(3_000_000);
-            window.contains(&t)
-                && matches!(
-                    f.kind,
-                    FaultKind::Kick { .. }
-                        | FaultKind::Impact { .. }
-                        | FaultKind::MotorDesync { .. }
-                        | FaultKind::MotorDegraded { .. }
-                        | FaultKind::ImuDropout
-                        | FaultKind::ImuStuck
-                        | FaultKind::ImuGarbage { .. }
-                )
-        })
+    /// Faults that excuse the flight expectations.
+    fn excusing_fault(sc: &Scenario, t: u64) -> bool {
+        Self::excuses(sc, t, |e| e != Excuse::Nothing)
+    }
+
+    /// Faults that excuse the failsafe's flight too: not a lost link or wind,
+    /// which the failsafe must cope with on its own.
+    fn flight_fault(sc: &Scenario, t: u64) -> bool {
+        Self::excuses(sc, t, |e| e == Excuse::Flight)
     }
 
     /// Inside a deliberate wild maneuver (flip, stick slam, drop) or the
@@ -396,8 +370,7 @@ impl Monitor {
     fn wild(sc: &Scenario, t: u64) -> bool {
         sc.segments.iter().enumerate().any(|(i, s)| {
             let end = sc.segments.get(i + 1).map_or(u64::MAX, |n| n.start_us);
-            matches!(s.action, Action::Flip { .. } | Action::StickSlam | Action::Drop | Action::InvertedHang { .. })
-                && t >= s.start_us
+            s.action.is_wild() && t >= s.start_us
                 && t < end.saturating_add(3_000_000)
         })
     }
@@ -423,7 +396,7 @@ impl Monitor {
                 break;
             }
             if after.armed && airborne {
-                self.stats.faults_in_flight.push(fault_name(&f.kind));
+                self.stats.faults_in_flight.push(f.kind.name());
             }
             self.faults_started += 1;
         }
@@ -583,7 +556,7 @@ impl Monitor {
                     format!("{reason:?} at {alt:.1} m, tilt {:.0} deg, IMU fresh {} ms ago", true_tilt.to_degrees(), t.saturating_sub(self.last_good_imu_us) / 1000),
                 );
             }
-            if reason == Some(DisarmReason::Failsafe) && alt > 1.0 && !sc.unflyable() && !Self::excusing_fault_besides_link(sc, t) {
+            if reason == Some(DisarmReason::Failsafe) && alt > 1.0 && !sc.unflyable() && !Self::flight_fault(sc, t) {
                 self.fail(t, "failsafe_lands_softly", format!("failsafe disarmed at {alt:.1} m"));
             }
         }
@@ -709,7 +682,7 @@ impl Monitor {
         }
 
         // Failsafe flight: level, sink, disarm on touchdown.
-        let flyable_now = !sc.unflyable() && !Self::excusing_fault_besides_link(sc, t);
+        let flyable_now = !sc.unflyable() && !Self::flight_fault(sc, t);
         if after.armed && after.failsafe != FailsafeStage::None {
             let since = *self.failsafe_since.get_or_insert(t);
             if airborne && flyable_now && t - since > REQ_FAILSAFE_LEVEL_US {
@@ -1074,7 +1047,7 @@ impl Monitor {
         if world.body.on_ground {
             if let Some((speed, vz)) = self.airborne_speed.take() {
                 if before.failsafe == FailsafeStage::Landing || after.failsafe == FailsafeStage::Landing {
-                    if !sc.unflyable() && !Self::excusing_fault_besides_link(sc, t) {
+                    if !sc.unflyable() && !Self::flight_fault(sc, t) {
                         self.live("failsafe_lands_softly");
                         if vz > REQ_SOFT_TOUCHDOWN {
                             self.fail(t, "failsafe_lands_softly", format!("touched down at {vz:.1} m/s vertical"));

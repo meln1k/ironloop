@@ -103,6 +103,87 @@ pub enum FaultKind {
     RebootRequest,
 }
 
+/// What a fault excuses while it is active (and for a recovery window
+/// after).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Excuse {
+    /// Nothing: the firmware must fly through it.
+    Nothing,
+    /// Normal flight, but not the failsafe, which exists to cope with it.
+    LinkOrWeather,
+    /// Flight expectations, the failsafe's included: the airframe or its
+    /// sensors were hit.
+    Flight,
+}
+
+impl FaultKind {
+    /// One of every kind.
+    pub const ALL: [FaultKind; 17] = [
+        FaultKind::ImuDropout,
+        FaultKind::ImuStuck,
+        FaultKind::ImuGarbage { p: 0.0 },
+        FaultKind::Kick { torque: Vec3::ZERO },
+        FaultKind::Impact { torque: Vec3::ZERO },
+        FaultKind::MotorDesync { motor: 0 },
+        FaultKind::MotorDead { motor: 0 },
+        FaultKind::MotorDegraded { motor: 0, factor: 1.0 },
+        FaultKind::RcLoss,
+        FaultKind::RcGlitch { p: 0.0 },
+        FaultKind::TelemetryLoss,
+        FaultKind::WindShift { wind: Vec3::ZERO },
+        FaultKind::ClockGlitch { back_us: 0 },
+        FaultKind::TimingJitter { jitter_us: 0 },
+        FaultKind::EventDrop { p: 0.0 },
+        FaultKind::FcStall,
+        FaultKind::RebootRequest,
+    ];
+
+    pub fn name(&self) -> &'static str {
+        match self {
+            FaultKind::ImuDropout => "ImuDropout",
+            FaultKind::ImuStuck => "ImuStuck",
+            FaultKind::ImuGarbage { .. } => "ImuGarbage",
+            FaultKind::Kick { .. } => "Kick",
+            FaultKind::Impact { .. } => "Impact",
+            FaultKind::MotorDesync { .. } => "MotorDesync",
+            FaultKind::MotorDead { .. } => "MotorDead",
+            FaultKind::MotorDegraded { .. } => "MotorDegraded",
+            FaultKind::RcLoss => "RcLoss",
+            FaultKind::RcGlitch { .. } => "RcGlitch",
+            FaultKind::TelemetryLoss => "TelemetryLoss",
+            FaultKind::WindShift { .. } => "WindShift",
+            FaultKind::ClockGlitch { .. } => "ClockGlitch",
+            FaultKind::TimingJitter { .. } => "TimingJitter",
+            FaultKind::EventDrop { .. } => "EventDrop",
+            FaultKind::FcStall => "FcStall",
+            FaultKind::RebootRequest => "RebootRequest",
+        }
+    }
+
+    pub fn excuse(&self) -> Excuse {
+        match self {
+            FaultKind::Kick { .. }
+            | FaultKind::Impact { .. }
+            | FaultKind::MotorDesync { .. }
+            | FaultKind::MotorDegraded { .. }
+            | FaultKind::ImuDropout
+            | FaultKind::ImuStuck
+            | FaultKind::ImuGarbage { .. } => Excuse::Flight,
+            FaultKind::RcLoss | FaultKind::WindShift { .. } => Excuse::LinkOrWeather,
+            // A dead motor makes the whole build unflyable instead
+            // (`Scenario::unflyable`).
+            FaultKind::MotorDead { .. }
+            | FaultKind::RcGlitch { .. }
+            | FaultKind::TelemetryLoss
+            | FaultKind::ClockGlitch { .. }
+            | FaultKind::TimingJitter { .. }
+            | FaultKind::EventDrop { .. }
+            | FaultKind::FcStall
+            | FaultKind::RebootRequest => Excuse::Nothing,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Fault {
     pub at_us: u64,
@@ -147,6 +228,34 @@ pub enum Action {
     Land,
     /// Cut throttle and drop from wherever it is.
     Drop,
+}
+
+impl Action {
+    /// The pilot means to be flying: one who finds the quad disarmed arms
+    /// it first.
+    pub fn is_flight(&self) -> bool {
+        matches!(self, Action::Hover { .. } | Action::Cruise { .. } | Action::Flip { .. } | Action::Punch | Action::StickSlam | Action::StickScript { .. })
+    }
+
+    /// Aggressive pilot input; the generator follows each with a recovery
+    /// hover.
+    pub fn is_maneuver(&self) -> bool {
+        self.snaps_sticks() || *self == Action::Punch
+    }
+
+    /// The maneuvers whose sticks move instantly instead of at hand speed.
+    /// A punch moves only the throttle, which is instant anyway; its
+    /// centered roll and pitch come back at hand speed.
+    pub fn snaps_sticks(&self) -> bool {
+        matches!(self, Action::StickSlam | Action::Flip { .. } | Action::InvertedHang { .. } | Action::StickScript { .. })
+    }
+
+    /// May end in a tumble or a hard touchdown, so the flight expectations
+    /// are off during it and for 3 s after. A stick script is judged by its
+    /// own checks, and a punch in angle mode must stay level.
+    pub fn is_wild(&self) -> bool {
+        matches!(self, Action::Flip { .. } | Action::StickSlam | Action::Drop | Action::InvertedHang { .. })
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -476,7 +585,7 @@ impl Scenario {
             };
             sc.segments.push(Segment { start_us: t, mode, action });
             t += dur;
-            if matches!(action, Action::Punch | Action::StickSlam | Action::Flip { .. } | Action::InvertedHang { .. } | Action::StickScript { .. }) {
+            if action.is_maneuver() {
                 sc.segments.push(Segment { start_us: t, mode, action: Action::Hover { alt: 2.0 } });
                 t += 3 * s;
             }

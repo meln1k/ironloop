@@ -705,8 +705,7 @@ impl Sim {
         // Disarmed when it should be flying (arming refused while still
         // calibrating, or a safety disarm): throttle down and cycle the
         // switch until it arms, then carry on with the plan.
-        let flight = matches!(seg.action, Action::Hover { .. } | Action::Cruise { .. } | Action::Flip { .. } | Action::Punch | Action::StickSlam | Action::StickScript { .. });
-        let action = if flight && !self.status.armed { Action::Arm { throttle: 0.0 } } else { seg.action };
+        let action = if seg.action.is_flight() && !self.status.armed { Action::Arm { throttle: 0.0 } } else { seg.action };
         match action {
             Action::Disarmed { throttle } => {
                 out.arm = self.sc.arm_switch_at_boot && t + 500_000 < next_start && seg.start_us == 0;
@@ -827,7 +826,7 @@ impl Sim {
         h.throttle = out.throttle;
         h.arm = out.arm;
         h.acro = out.acro;
-        if matches!(seg.action, Action::StickSlam | Action::Flip { .. } | Action::InvertedHang { .. } | Action::StickScript { .. }) {
+        if seg.action.snaps_sticks() {
             *h = out;
         }
         *h
