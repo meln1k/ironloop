@@ -346,7 +346,9 @@ pub struct State {
     runaway_since_us: Option<u64>,
     runaway_ok_us: u64,
     lying_since_us: Option<u64>,
-    blocked_since_us: Option<u64>,
+    /// Time spent blocked (see `runaway_and_crash`), and when it last was.
+    blocked_us: u64,
+    blocked_last_us: u64,
     last_impact_us: Option<u64>,
     boot_gesture_since_us: Option<u64>,
 
@@ -435,7 +437,8 @@ impl State {
             runaway_since_us: None,
             runaway_ok_us: 0,
             lying_since_us: None,
-            blocked_since_us: None,
+            blocked_us: 0,
+            blocked_last_us: 0,
             last_impact_us: None,
             boot_gesture_since_us: None,
             battery_volts: None,
@@ -969,6 +972,10 @@ fn control(s: &mut State, gyro: Vec3, accel: Vec3, dt: f32, reset: bool, fx: &mu
     }
 }
 
+/// How long a frame must stay unblocked before its blocked time starts
+/// over (µs).
+const CRASH_BLOCKED_GAP_US: u64 = 500_000;
+
 fn runaway_and_crash(s: &mut State, gyro: Vec3, accel: Vec3, throttle: f32, dt: f32, fx: &mut Out) {
     let cfg = s.cfg;
     let now = s.now_us;
@@ -993,11 +1000,13 @@ fn runaway_and_crash(s: &mut State, gyro: Vec3, accel: Vec3, throttle: f32, dt: 
         } else {
             s.runaway_since_us = None;
             // Calm, level flight shows the build works, and so does a
-            // pilot flying it with the sticks (as Betaflight counts it).
+            // pilot flying it with the sticks (as Betaflight counts it),
+            // as long as it stays the right way up with the PIDs in range.
             // Throttle alone does not: a quad that cannot fly may sit on
-            // the ground at part throttle until a gust tips it.
-            let calm = !spinning && s.attitude.tilt() < 30f32.to_radians();
-            if throttle > cfg.airmode_throttle && (calm || flown) {
+            // the ground at part throttle until a gust tips it, and then
+            // tumble about on it while the pilot works the sticks.
+            let upright = s.attitude.tilt() < 30f32.to_radians();
+            if throttle > cfg.airmode_throttle && upright && !pid_high && (!spinning || flown) {
                 s.runaway_ok_us += (dt * 1e6) as u64;
                 if s.runaway_ok_us >= cfg.runaway_deactivate_us {
                     s.runaway_active = false;
@@ -1045,7 +1054,10 @@ fn runaway_and_crash(s: &mut State, gyro: Vec3, accel: Vec3, throttle: f32, dt: 
         s.last_impact_us = Some(now);
     }
     let propped = (0.7 * GRAVITY..1.3 * GRAVITY).contains(&a) && -accel.z / a < 0.64;
-    let lying = tilt > 60f32.to_radians() && rp_motion < 0.5 && propped;
+    // Spinning flat on the ground with the thrust and friction pulling
+    // the attitude estimate a few degrees off, part of the spin reads as
+    // roll and pitch; allow for about 15 degrees of that.
+    let lying = tilt > 60f32.to_radians() && rp_motion < 0.5 + 0.25 * slow.norm() && propped;
     // Blocked means not turning the way the sticks ask, whatever else it
     // does: a corkscrew dive rolls about the vertical, like a quad spinning
     // flat, but it follows the stick.
@@ -1055,9 +1067,17 @@ fn runaway_and_crash(s: &mut State, gyro: Vec3, accel: Vec3, throttle: f32, dt: 
     // Each condition times itself: a pilot rolling out of a slow inverted
     // dive turns `lying` into `blocked` for a moment, and must get the full
     // blocked time for the frame to follow.
-    let since = |t: &mut Option<u64>, on: bool| if on { now - *t.get_or_insert(now) } else { *t = None; 0 };
-    let lying_for = since(&mut s.lying_since_us, lying);
-    let blocked_for = since(&mut s.blocked_since_us, blocked);
+    let lying_for = if lying { now - *s.lying_since_us.get_or_insert(now) } else { s.lying_since_us = None; 0 };
+    // Blocked adds up: a pilot slamming the sticks from side to side rocks
+    // a stuck frame towards each new demand for a moment, which is not
+    // getting free. Only righting itself or half a second unblocked is.
+    if blocked {
+        s.blocked_us += (dt * 1e6) as u64;
+        s.blocked_last_us = now;
+    } else if tilt <= 60f32.to_radians() || now.saturating_sub(s.blocked_last_us) >= CRASH_BLOCKED_GAP_US {
+        s.blocked_us = 0;
+    }
+    let blocked_for = if blocked { s.blocked_us } else { 0 };
     let hit = s.lying_since_us.is_some_and(|l| s.last_impact_us.is_some_and(|t| t + cfg.crash_impact_window_us >= l));
     if (hit && lying_for >= cfg.crash_still_us) || blocked_for >= cfg.crash_blocked_us {
         disarm(s, DisarmReason::Crash, fx);
@@ -1134,7 +1154,7 @@ fn on_rc(s: &mut State, channels: &[u16; RC_CHANNELS], fx: &mut Out) {
             s.runaway_since_us = None;
             s.runaway_ok_us = 0;
             s.lying_since_us = None;
-            s.blocked_since_us = None;
+            s.blocked_us = 0;
             s.last_impact_us = None;
             s.motor_faults = [false; 4];
             s.motor_fault_since_us = [None; 4];

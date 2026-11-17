@@ -25,9 +25,14 @@ fn generated_scenarios_hold_every_property_and_replay_identically() {
 /// Seed 3934 has its motor wires swapped and motor 1 losing sync, which
 /// the firmware reports on output 0; the monitor once judged that report
 /// against physical motor 0.
+/// Seed 838 has its motors swapped and tumbles upside down on the ground
+/// while the pilot slams the sticks, which once counted as proven flight
+/// and reset the blocked-crash timer at every stick reversal.
+/// Seed 88 crashes onto its nose and spins flat with the roll stick held,
+/// which the attitude estimate's error once made look like rolling.
 #[test]
 fn regression_seeds_hold_every_property() {
-    for seed in [1531, 822, 3007, 6875, 3934] {
+    for seed in [1531, 822, 3007, 6875, 3934, 838, 88] {
         let r = run_seed(seed);
         assert!(r.violations.is_empty(), "seed {seed} [{}]: {:?}", r.name, r.violations);
     }
