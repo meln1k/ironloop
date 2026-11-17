@@ -507,6 +507,7 @@ pub fn step(mut s: State, event: &Event) -> (State, Effects) {
         s.now_us = event.t_us;
     }
 
+    let motors_before = s.motors;
     match event.kind {
         EventKind::Imu { gyro, accel } => imu::on_imu(&mut s, gyro, accel, &mut fx),
         EventKind::Rc { channels } => on_rc(&mut s, &channels, &mut fx),
@@ -515,14 +516,7 @@ pub fn step(mut s: State, event: &Event) -> (State, Effects) {
             imu::on_erpm(&mut s, &erpm);
             health::check_motors(&mut s, &erpm, &mut fx);
         }
-        EventKind::Tick => {
-            // ESCs need a steady command stream; if IMU samples (which
-            // normally drive the motors) are late, repeat the last command
-            // until the IMU timeout decides.
-            if s.armed && s.last_imu_us.is_none_or(|t| s.now_us.saturating_sub(t) >= 1_000) {
-                fx.push(Effect::Motors(s.motors));
-            }
-        }
+        EventKind::Tick => {}
         EventKind::Command(Command::RebootToBootloader) => {
             if !s.armed {
                 fx.push(Effect::RebootToBootloader);
@@ -530,11 +524,34 @@ pub fn step(mut s: State, event: &Event) -> (State, Effects) {
         }
     }
     housekeeping(&mut s, &mut fx);
+    // `s.motors` is the one motor command; send it on every IMU sample,
+    // whenever it changed (arming, disarming), and on ticks while IMU
+    // samples are late: ESCs need a steady stream, so the last command
+    // repeats until the IMU timeout disarms.
+    let imu_late = s.last_imu_us.is_none_or(|t| s.now_us.saturating_sub(t) >= 1_000);
+    let send = match event.kind {
+        EventKind::Imu { .. } => true,
+        EventKind::Tick => s.armed && imu_late,
+        _ => false,
+    };
+    if send || s.motors != motors_before {
+        fx.send_motors(s.motors);
+    }
     s.effects_dropped = s.effects_dropped.saturating_add(fx.dropped);
     (s, fx.list)
 }
 
 impl Out {
+    /// Sends the motor command first. It is never the effect dropped: if
+    /// the step's output is full, the last notice makes room.
+    fn send_motors(&mut self, m: [u16; 4]) {
+        if self.list.is_full() {
+            self.list.pop();
+            self.dropped += 1;
+        }
+        let _ = self.list.insert(0, Effect::Motors(m));
+    }
+
     fn push(&mut self, e: Effect) {
         // Capacity is sized for the worst case; dropping a notice is
         // preferable to panicking in flight if that ever proves wrong, but
@@ -567,7 +584,6 @@ fn disarm(s: &mut State, reason: DisarmReason, fx: &mut Out) {
     s.motors = [DSHOT_STOP; 4];
     s.motor_frac = [0.0; 4];
     s.throttle_out = 0.0;
-    fx.push(Effect::Motors(s.motors));
     fx.push(Effect::Notice(Notice::Disarmed(reason)));
 }
 
@@ -641,7 +657,6 @@ fn on_rc(s: &mut State, channels: &[u16; RC_CHANNELS], fx: &mut Out) {
             // the disarmed zeros it would hold the motors stopped while armed.
             s.motors = [control::dshot(s.cfg.motor_idle); 4];
             fx.push(Effect::Notice(Notice::Armed(s.rc.mode)));
-            fx.push(Effect::Motors(s.motors));
         } else {
             fx.push(Effect::Notice(Notice::ArmingBlocked(blockers)));
         }

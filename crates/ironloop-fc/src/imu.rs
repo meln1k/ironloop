@@ -76,11 +76,9 @@ pub(crate) fn on_imu(s: &mut State, gyro: [f32; 3], accel: [f32; 3], fx: &mut Ou
     let dt_us = s.last_imu_us.map_or(0, |t| now.saturating_sub(t));
     s.last_imu_us = Some(now);
     if !valid {
+        // `step` keeps the ESCs fed with the last command until the IMU
+        // timeout.
         fx.push(Effect::Notice(Notice::ImuSampleRejected));
-        if s.armed {
-            // Keep the ESCs fed with the last command until the IMU timeout.
-            fx.push(Effect::Motors(s.motors));
-        }
         return;
     }
     let gap = s.last_good_imu_us.is_none_or(|t| now.saturating_sub(t) > s.cfg.imu_timeout_us);
@@ -148,7 +146,6 @@ pub(crate) fn on_imu(s: &mut State, gyro: [f32; 3], accel: [f32; 3], fx: &mut Ou
     } else {
         s.prev_gyro = gyro_f;
         s.dterm_lpf.y = Vec3::ZERO;
-        fx.push(Effect::Motors([crate::DSHOT_STOP; 4]));
     }
 }
 

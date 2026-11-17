@@ -2,7 +2,7 @@
 //! hover learning, setpoint, PID with I-term relax, mixer and airmode.
 
 use crate::math::{Vec3, tilt_error, up_in_body};
-use crate::{DSHOT_MAX, DSHOT_MIN, Effect, FailsafeStage, FlightMode, Out, Rates, State, THROTTLE_LOW, failsafe, protect};
+use crate::{DSHOT_MAX, DSHOT_MIN, FailsafeStage, FlightMode, Out, Rates, State, THROTTLE_LOW, failsafe, protect};
 use libm::roundf;
 
 /// Motor mix (roll, pitch, yaw per motor) for QuadX in Betaflight motor
@@ -179,7 +179,4 @@ pub(crate) fn control(s: &mut State, gyro: Vec3, accel: Vec3, dt: f32, reset: bo
     }
 
     protect::runaway_and_crash(s, gyro, accel, throttle, dt, fx);
-    if s.armed {
-        fx.push(Effect::Motors(s.motors));
-    }
 }

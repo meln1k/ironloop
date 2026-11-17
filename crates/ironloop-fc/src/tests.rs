@@ -350,3 +350,32 @@ fn a_still_quad_on_the_ground_resets_its_attitude_estimate() {
     let tilt = r.s.status().attitude.tilt().to_degrees();
     assert!((tilt - 60.0).abs() < 2.0, "tilt estimate {tilt} deg after 0.8 s still");
 }
+
+/// Arming spins the motors up to idle at once, and while IMU samples are
+/// late the housekeeping tick keeps repeating that command, never the
+/// disarmed zeros. Disarming stops them on the same step.
+#[test]
+fn arming_sends_idle_and_late_ticks_repeat_it() {
+    let mut r = Rig::new();
+    r.run(1500, Some(rc(1000, 1000, 1000, 1500)));
+    r.fx.clear();
+    r.t += 100;
+    r.ev(rc(1000, 2000, 1000, 1500));
+    assert!(r.s.status().armed);
+    let idle = control::dshot(r.s.config().motor_idle);
+    assert!(idle > DSHOT_MIN, "{idle}");
+    assert_eq!(r.fx[0], Effect::Motors([idle; 4]), "{:?}", r.fx);
+    // The last IMU sample was 1.1 ms ago and none follow: every tick
+    // repeats idle.
+    for _ in 0..4 {
+        r.fx.clear();
+        r.t += 1_000;
+        r.ev(EventKind::Tick);
+        let motors: std::vec::Vec<_> = r.fx.iter().filter(|e| matches!(e, Effect::Motors(_))).collect();
+        assert_eq!(motors, [&Effect::Motors([idle; 4])], "{:?}", r.fx);
+    }
+    r.fx.clear();
+    r.t += 100;
+    r.ev(rc(1000, 1000, 1000, 1500));
+    assert_eq!(r.fx.iter().filter(|e| matches!(e, Effect::Motors(_))).collect::<std::vec::Vec<_>>(), [&Effect::Motors([0; 4])]);
+}
