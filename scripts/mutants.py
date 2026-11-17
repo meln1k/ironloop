@@ -90,6 +90,7 @@ MUTANTS = {
         (CFG, "crash_still_us: 3_000_000,", "crash_still_us: 1_500_000,"),
     ],
     "arming leaves the motors at zero until the next IMU sample": [(LIB, "s.motors = [(idle as u16).clamp(DSHOT_MIN, DSHOT_MAX); 4];", "s.motors = [0; 4];")],
+    "runaway detection rearms after the build flew": [(LIB, "s.runaway_active = !s.flight_proven;", "s.runaway_active = true;")],
     "runaway fires on gyro alone": [(LIB, "if pid_high && spinning {", "if spinning {")],
     "runaway detection ends after 0.5 s of throttle alone": [
         (LIB, "if throttle > cfg.airmode_throttle && (calm || flown) {", "if throttle > cfg.airmode_throttle {"),

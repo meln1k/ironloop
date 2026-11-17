@@ -331,6 +331,9 @@ pub struct State {
     motor_frac: [f32; 4],
 
     runaway_active: bool,
+    /// The build has flown properly since power-up (runaway detection
+    /// switched itself off once), so motor order and direction are right.
+    flight_proven: bool,
     runaway_since_us: Option<u64>,
     runaway_ok_us: u64,
     lying_since_us: Option<u64>,
@@ -415,6 +418,7 @@ impl State {
             motors: [DSHOT_STOP; 4],
             motor_frac: [0.0; 4],
             runaway_active: false,
+            flight_proven: false,
             runaway_since_us: None,
             runaway_ok_us: 0,
             lying_since_us: None,
@@ -964,6 +968,7 @@ fn runaway_and_crash(s: &mut State, gyro: Vec3, accel: Vec3, throttle: f32, dt: 
                 s.runaway_ok_us += (dt * 1e6) as u64;
                 if s.runaway_ok_us >= cfg.runaway_deactivate_us {
                     s.runaway_active = false;
+                    s.flight_proven = true;
                 }
             }
         }
@@ -1077,7 +1082,11 @@ fn on_rc(s: &mut State, channels: &[u16; RC_CHANNELS], fx: &mut Out) {
             s.airmode_active = false;
             s.vz_est = 0.0;
             s.integral = Vec3::ZERO;
-            s.runaway_active = true;
+            // Runaway detection catches a build that cannot fly. Once this
+            // power-up has shown it flies, a re-arm (even mid-air, to save a
+            // fall) must not mistake the fight back from a crash for one;
+            // crash detection handles that.
+            s.runaway_active = !s.flight_proven;
             s.runaway_since_us = None;
             s.runaway_ok_us = 0;
             s.lying_since_us = None;

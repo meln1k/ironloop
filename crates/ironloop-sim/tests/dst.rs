@@ -20,9 +20,11 @@ fn generated_scenarios_hold_every_property_and_replay_identically() {
 /// runaway check that waits for calm flight mistook for a runaway.
 /// Seed 3007 arms during an IMU dropout, which once left the motors at
 /// the disarmed zeros while armed until the next sample.
+/// Seed 6875 is re-armed mid-fall after flying fine and hits the ground,
+/// which runaway detection once took for a build that cannot fly.
 #[test]
 fn regression_seeds_hold_every_property() {
-    for seed in [1531, 822, 3007] {
+    for seed in [1531, 822, 3007, 6875] {
         let r = run_seed(seed);
         assert!(r.violations.is_empty(), "seed {seed} [{}]: {:?}", r.name, r.violations);
     }
