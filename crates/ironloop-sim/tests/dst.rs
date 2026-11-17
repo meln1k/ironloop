@@ -147,3 +147,40 @@ fn a_snapshot_resumes_identically() {
         assert_eq!(a.trace_hash, run_seed(seed).trace_hash, "seed {seed}");
     }
 }
+
+/// Acro freestyle on a powerful build (twice the Mobula6's thrust): climb,
+/// roll inverted, power-dive, cut the throttle and fall inverted hands off,
+/// then roll back and catch it. Cutting the throttle at the bottom of the
+/// dive brakes at over 4 g on drag alone, and the fall then reads like lying
+/// on the ground; no automatic disarm may happen in the air.
+#[test]
+fn an_inverted_power_dive_and_hands_off_fall_never_disarms_in_the_air() {
+    use ironloop_sim::{Sim, Sticks};
+    let mut sc = Scenario::manual(0);
+    sc.frame.k_t *= 2.0;
+    let mut sim = Sim::new(sc);
+    let (mut phase, mut since) = (0, 0.0);
+    while sim.t_us < 45_000_000 {
+        let t = sim.t_us as f64 * 1e-6;
+        let (tilt, alt) = (sim.world.body.att.tilt().to_degrees(), sim.world.altitude());
+        let mut s = Sticks { arm: t > 1.5, acro: true, ..Default::default() };
+        let done = match phase {
+            0 => { s.throttle = if t > 2.0 { 1.0 } else { 0.0 }; alt > 150.0 }
+            1 => { s.throttle = 0.3; s.roll = 1.0; tilt > 170.0 }
+            2 => { s.throttle = 1.0; t - since > 3.0 }
+            3 => { s.throttle = 0.0; t - since > 6.0 }
+            4 => { s.throttle = 0.5; s.roll = 1.0; tilt < 20.0 }
+            _ => { s.throttle = 0.4; false }
+        };
+        if done {
+            phase += 1;
+            since = t;
+        }
+        sim.manual = Some(s);
+        sim.next_event();
+        if !sim.status.armed && t > 2.0 {
+            assert!(sim.world.altitude() < 1.0, "disarmed at {:.1} m in phase {phase}: {:?}", sim.world.altitude(), sim.notices.last());
+        }
+    }
+    assert!(phase >= 5, "the flight plan did not finish (phase {phase})");
+}

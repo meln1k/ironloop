@@ -107,6 +107,9 @@ pub struct Config {
     /// Filtered acceleration above this (m/s^2) counts as an impact. Thrust
     /// alone stays below it.
     pub crash_impact: f32,
+    /// An impact must also exceed what thrust and drag can produce in
+    /// flight (from the learned hover throttle) by this factor.
+    pub crash_impact_margin: f32,
     /// Lying only counts as a crash if an impact came at most this long
     /// before it began (µs).
     pub crash_impact_window_us: u64,
@@ -171,6 +174,7 @@ impl Default for Config {
             runaway_deactivate_us: 1_000_000,
             crash_still_us: 3_000_000,
             crash_impact: 4.0 * 9.80665,
+            crash_impact_margin: 1.15,
             crash_impact_window_us: 2_000_000,
             crash_blocked_us: 1_500_000,
             motor_fault_frac: 0.3,

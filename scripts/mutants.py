@@ -91,7 +91,9 @@ MUTANTS = {
     ],
     "arming leaves the motors at zero until the next IMU sample": [(LIB, "s.motors = [(idle as u16).clamp(DSHOT_MIN, DSHOT_MAX); 4];", "s.motors = [0; 4];")],
     "runaway detection rearms after the build flew": [(LIB, "s.runaway_active = !s.flight_proven;", "s.runaway_active = true;")],
-    "runaway fires on gyro alone": [(LIB, "if pid_high && spinning {", "if spinning {")],
+    "runaway fires on a pilot's stick reversal": [(LIB, "if pid_high && spinning && (pushed_back || !flown) {", "if pid_high && spinning {")],
+    "crash impact counts drag braking after a power dive": [(LIB, "if a > cfg.crash_impact && jolt {", "if a > cfg.crash_impact {")],
+    "runaway fires on gyro alone": [(LIB, "if pid_high && spinning && (pushed_back || !flown) {", "if spinning {")],
     "runaway detection ends after 0.5 s of throttle alone": [
         (LIB, "if throttle > cfg.airmode_throttle && (calm || flown) {", "if throttle > cfg.airmode_throttle {"),
         (CFG, "runaway_deactivate_us: 1_000_000,", "runaway_deactivate_us: 500_000,"),
@@ -111,7 +113,7 @@ MUTANTS = {
     )],
     "no re-convergence after gyro saturation": [(LIB, "s.fast_converge_until_us = now + 1_500_000;", "s.fast_converge_until_us = now;")],
     # Runaway, notices, link recovery.
-    "no runaway detection": [(LIB, "if pid_high && spinning {", "if false {")],
+    "no runaway detection": [(LIB, "if pid_high && spinning && (pushed_back || !flown) {", "if false {")],
     "battery warning at 3.75 V": [(CFG, "vbat_warn_cell: 3.45,", "vbat_warn_cell: 3.75,")],
     "motor fault below 95% of expected eRPM": [(CFG, "motor_fault_frac: 0.3,", "motor_fault_frac: 0.95,")],
     "failsafe needs 3 s of link to recover": [(CFG, "failsafe_recovery_us: 300_000,", "failsafe_recovery_us: 3_000_000,")],

@@ -289,6 +289,8 @@ pub struct State {
     /// Heavily filtered gyro: body motion without prop vibration.
     gyro_slow: Pt1v,
     prev_gyro: Vec3,
+    /// Filtered angular acceleration (the D term's input), rad/s².
+    ang_accel: Vec3,
     gyro_saturated: bool,
     fast_converge_until_us: u64,
 
@@ -381,6 +383,7 @@ impl State {
             accel_lpf: Pt1v::default(),
             gyro_slow: Pt1v::default(),
             prev_gyro: Vec3::ZERO,
+            ang_accel: Vec3::ZERO,
             gyro_saturated: false,
             fast_converge_until_us: 0,
             attitude: Quat::IDENTITY,
@@ -867,6 +870,7 @@ fn control(s: &mut State, gyro: Vec3, accel: Vec3, dt: f32, reset: bool, fx: &mu
     let d_gyro = (gyro - s.prev_gyro) * (1.0 / dt);
     s.prev_gyro = gyro;
     let d_gyro = s.dterm_lpf.update(d_gyro, cfg.dterm_lpf_hz, dt);
+    s.ang_accel = d_gyro;
 
     let err = setpoint - gyro;
     // No I-term at zero throttle: resting on the ground (or a wall) the
@@ -950,7 +954,15 @@ fn runaway_and_crash(s: &mut State, gyro: Vec3, accel: Vec3, throttle: f32, dt: 
         let lim = cfg.pid_sum_limit * cfg.runaway_pid_frac;
         let pid_high = s.last_pid.x.abs() >= lim || s.last_pid.y.abs() >= lim;
         let spinning = gyro.norm() > cfg.runaway_gyro;
-        if pid_high && spinning {
+        // A pilot's stick reversal saturates the PIDs while the frame still
+        // turns the old way, but it slows down in the direction pushed. A
+        // build that cannot fly speeds up away from the push. With the
+        // sticks moved, only that counts; with them centred, any saturated
+        // spin does (a tumble on the ground need not speed up).
+        let flown = s.rc.roll.abs().max(s.rc.pitch.abs()).max(s.rc.yaw.abs()) > 0.15;
+        let p = s.last_pid;
+        let pushed_back = s.ang_accel.x * p.x + s.ang_accel.y * p.y < 0.0;
+        if pid_high && spinning && (pushed_back || !flown) {
             let since = *s.runaway_since_us.get_or_insert(now);
             if now - since >= cfg.runaway_us {
                 disarm(s, DisarmReason::RunawayTakeoff, fx);
@@ -963,7 +975,6 @@ fn runaway_and_crash(s: &mut State, gyro: Vec3, accel: Vec3, throttle: f32, dt: 
             // Throttle alone does not: a quad that cannot fly may sit on
             // the ground at part throttle until a gust tips it.
             let calm = !spinning && s.attitude.tilt() < 30f32.to_radians();
-            let flown = s.rc.roll.abs().max(s.rc.pitch.abs()).max(s.rc.yaw.abs()) > 0.15;
             if throttle > cfg.airmode_throttle && (calm || flown) {
                 s.runaway_ok_us += (dt * 1e6) as u64;
                 if s.runaway_ok_us >= cfg.runaway_deactivate_us {
@@ -997,7 +1008,18 @@ fn runaway_and_crash(s: &mut State, gyro: Vec3, accel: Vec3, throttle: f32, dt: 
     let up = up_in_body_frame(s.attitude);
     let rp_motion = (slow - up * slow.dot(up)).norm();
     let a = accel.norm();
-    if a > cfg.crash_impact {
+    // An impact is a jolt no flight can produce. Thrust is at most
+    // thrust/weight (about 1 / hover throttle squared) in g along the thrust
+    // axis; drag reaches thrust/weight + 1 g after a power dive (cutting
+    // the throttle at the bottom of an inverted dive brakes at that), and
+    // adds to thrust along the thrust axis when pulling out of one.
+    let h = s.hover_throttle.clamp(0.15, 0.9);
+    let tw = 1.0 / (h * h);
+    let margin = cfg.crash_impact_margin;
+    let along_thrust = -accel.z;
+    let across = Vec3::new(accel.x, accel.y, accel.z.max(0.0)).norm();
+    let jolt = across > (tw + 1.0) * GRAVITY * margin || along_thrust > (2.0 * tw + 1.0) * GRAVITY * margin;
+    if a > cfg.crash_impact && jolt {
         s.last_impact_us = Some(now);
     }
     let propped = (0.7 * GRAVITY..1.3 * GRAVITY).contains(&a) && -accel.z / a < 0.64;

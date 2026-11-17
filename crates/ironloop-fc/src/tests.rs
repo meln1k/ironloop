@@ -302,3 +302,29 @@ fn mixer_matches_betaflight_quad_x() {
         assert_eq!(*m, [bf[0], -bf[1], -bf[2]]);
     }
 }
+
+/// A full-stick reversal right after the first arm saturates the PIDs while
+/// the frame still turns the old way. Slowing down toward the stick is a
+/// pilot flying; speeding up away from it is a build that cannot fly.
+#[test]
+fn a_stick_reversal_is_no_runaway_but_turning_away_from_the_stick_is() {
+    for (accel, runaway) in [(60.0, false), (-60.0, true)] {
+        let mut r = Rig::new();
+        r.run(1500, Some(rc(1000, 1000, 2000, 1500)));
+        r.run(50, Some(rc(1000, 2000, 2000, 1500)));
+        assert!(r.s.status().armed);
+        // Rolling left at 15 rad/s, full right stick: 150 ms of the frame
+        // changing its rate by `accel` rad/s².
+        for i in 0..300 {
+            r.t += 500;
+            let g = -15.0 + accel * i as f32 * 500e-6 + if i % 2 == 0 { 1e-4 } else { -1e-4 };
+            r.ev(EventKind::Imu { gyro: [g, 0.0, 0.0], accel: LEVEL_ACCEL });
+            if i % 20 == 0 {
+                r.ev(EventKind::Battery { volts: 4.2, amps: 0.0 });
+                r.ev(rc(1500, 2000, 2000, 2000));
+            }
+        }
+        let disarmed = r.notices().contains(&Notice::Disarmed(DisarmReason::RunawayTakeoff));
+        assert_eq!(disarmed, runaway, "angular acceleration {accel}: {:?}", r.notices());
+    }
+}
