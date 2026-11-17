@@ -52,10 +52,10 @@ MUTANTS = {
     "rc_timeout 10 ms (false failsafe)": [(CFG, "rc_timeout_us: 100_000,", "rc_timeout_us: 10_000,")],
     "failsafe spins up on the ground": [(LIB, "FailsafeStage::Hold if s.throttle_at_loss < 0.05 => (0.0, 0.0, 0.0, 0.0),\n", "")],
     "failsafe lands at fixed 28% for 4 s": [
-        (LIB, "(0.0, 0.0, 0.0, s.hover_throttle * k)", "(0.0, 0.0, 0.0, 0.28 + 0.0 * k)"),
+        (LIB, "(0.0, 0.0, 0.0, s.hover_throttle * k / sag_ratio(s))", "(0.0, 0.0, 0.0, 0.28 + 0.0 * k)"),
         (CFG, "failsafe_landing_us: 30_000_000,", "failsafe_landing_us: 4_000_000,"),
     ],
-    "failsafe lands at 100% hover (no descent)": [(LIB, "(0.0, 0.0, 0.0, s.hover_throttle * k)", "(0.0, 0.0, 0.0, s.hover_throttle * 1.0 + 0.0 * k)")],
+    "failsafe lands at 100% hover (no descent)": [(LIB, "(0.0, 0.0, 0.0, s.hover_throttle * k / sag_ratio(s))", "(0.0, 0.0, 0.0, s.hover_throttle / sag_ratio(s) + 0.0 * k)")],
     "failsafe touchdown detection never fires": [(LIB, "let touchdown = s.landing_trim >= 0.3 && s.landing_accel.abs() < 0.6 && s.vz_est - s.landing_trim_vz < 0.5;", "let touchdown = false;")],
     "hover learning also runs in failsafe": [(LIB, "if s.failsafe == FailsafeStage::None && s.airmode_active && level_flight", "if s.airmode_active && level_flight")],
     "hover learning during climbs": [(LIB, "let level_flight = s.vz_est.abs() < 0.5;", "let level_flight = true;")],
@@ -121,7 +121,7 @@ MUTANTS = {
     "battery warning at 3.75 V": [(CFG, "vbat_warn_cell: 3.45,", "vbat_warn_cell: 3.75,")],
     "motor fault below 95% of expected eRPM": [(CFG, "motor_fault_frac: 0.3,", "motor_fault_frac: 0.95,")],
     "failsafe needs 3 s of link to recover": [(CFG, "failsafe_recovery_us: 300_000,", "failsafe_recovery_us: 3_000_000,")],
-    "failsafe hold at 130% hover": [(LIB, "FailsafeStage::Hold => (0.0, 0.0, 0.0, s.hover_throttle),", "FailsafeStage::Hold => (0.0, 0.0, 0.0, s.hover_throttle * 1.3),")],
+    "failsafe hold at 130% hover": [(LIB, "FailsafeStage::Hold => (0.0, 0.0, 0.0, s.hover_throttle / sag_ratio(s)),", "FailsafeStage::Hold => (0.0, 0.0, 0.0, s.hover_throttle * 1.3 / sag_ratio(s)),")],
     # Control quality.
     "rate curve 40% low": [(LIB, "let dps = (200.0 * r.rc_rate * x * super_factor)", "let dps = (120.0 * r.rc_rate * x * super_factor)")],
     "roll/pitch D ten times too high (oscillates)": [(CFG, "d: 0.000525, ff: 0.0 }", "d: 0.00525, ff: 0.0 }")],

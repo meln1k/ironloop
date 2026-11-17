@@ -187,7 +187,8 @@ pub struct Status {
     /// Vertical speed estimate from the accelerometer (m/s, up positive).
     /// Leaky in normal flight; integrated during failsafe.
     pub climb_rate: f32,
-    /// Throttle believed to hold altitude (learned in flight).
+    /// Throttle believed to hold altitude (learned in flight), as it would
+    /// be with the pack at the sag-compensation reference voltage.
     pub hover_throttle: f32,
     /// The firmware's clock (µs, the newest event time seen).
     pub now_us: u64,
@@ -314,7 +315,8 @@ pub struct State {
     failsafe: FailsafeStage,
     failsafe_since_us: u64,
     throttle_at_loss: f32,
-    /// Throttle that holds altitude, learned while flying.
+    /// Throttle that holds altitude, learned while flying, as it would be
+    /// with the pack at the reference voltage (see `sag_ratio`).
     hover_throttle: f32,
     /// Leaky integral of vertical acceleration (m/s, down positive). It
     /// forgets steady motion over a few seconds, but shows climbs and
@@ -839,6 +841,22 @@ fn rate_curve(r: &Rates, stick: f32) -> f32 {
     dps.to_radians()
 }
 
+/// Motor speed for a throttle at the pack's voltage, relative to the same
+/// throttle at the sag-compensation reference voltage: 1 while compensation
+/// keeps up, less below about 3.1 V a cell where it is capped at 1.25x (a
+/// sagging pack then needs more throttle to hover), more above the
+/// reference (a fresh pack needs less).
+fn sag_ratio(s: &State) -> f32 {
+    let cfg = &s.cfg;
+    match (cfg.vbat_sag_comp, s.battery_volts) {
+        (true, Some(v)) if v > 0.5 => {
+            let vref = cfg.vbat_ref_cell * cfg.battery_cells as f32;
+            (vref / v).clamp(1.0, 1.25) * v / vref
+        }
+        _ => 1.0,
+    }
+}
+
 fn control(s: &mut State, gyro: Vec3, accel: Vec3, dt: f32, reset: bool, fx: &mut Out) {
     let cfg = s.cfg;
     // Vertical motion from the accelerometer, against what it read for 1 g
@@ -871,7 +889,7 @@ fn control(s: &mut State, gyro: Vec3, accel: Vec3, dt: f32, reset: bool, fx: &mu
         // Throttle at the bottom when the link went means the quad is on the
         // ground (or the pilot cut it): never spin up from there.
         FailsafeStage::Hold if s.throttle_at_loss < 0.05 => (0.0, 0.0, 0.0, 0.0),
-        FailsafeStage::Hold => (0.0, 0.0, 0.0, s.hover_throttle),
+        FailsafeStage::Hold => (0.0, 0.0, 0.0, s.hover_throttle / sag_ratio(s)),
         FailsafeStage::Landing => {
             let landing_s = s.now_us.saturating_sub(s.failsafe_since_us) as f32 * 1e-6;
             let ceiling = (1.15 - 0.04 * landing_s).max(1.0);
@@ -897,8 +915,15 @@ fn control(s: &mut State, gyro: Vec3, accel: Vec3, dt: f32, reset: bool, fx: &mu
                 (s.landing_trim - 2.0 * dt).max(0.0)
             };
             let brake = 0.15 * (s.vz_est - 1.2).max(0.0);
-            let k = (0.96 + brake).min(ceiling) - s.landing_trim;
-            (0.0, 0.0, 0.0, s.hover_throttle * k)
+            // A descent still speeding up gets up to 8% over the ceiling.
+            // This brakes on acceleration over a quarter second, which the
+            // estimate's slow drift cannot fake, so it cannot hold the quad
+            // up; it stops the trim's probes from adding up, and a learned
+            // hover throttle that is too low from running away. Only upright:
+            // a tumbling quad's estimate is meaningless.
+            let speeding = if s.attitude.tilt() < 0.5 { (0.04 * (s.landing_accel - 0.3)).clamp(0.0, 0.08) } else { 0.0 };
+            let k = (0.96 + brake).min(ceiling) + speeding - s.landing_trim;
+            (0.0, 0.0, 0.0, s.hover_throttle * k / sag_ratio(s))
         }
     };
     s.throttle_demand = throttle;
@@ -913,8 +938,11 @@ fn control(s: &mut State, gyro: Vec3, accel: Vec3, dt: f32, reset: bool, fx: &mu
     // down.
     let tilt = s.attitude.tilt();
     let level_flight = s.vz_est.abs() < 0.5;
+    // In reference-voltage terms, so the failsafe flies the same hover on a
+    // sagging pack.
+    let at_ref = sag_ratio(s);
     if s.failsafe == FailsafeStage::None && s.airmode_active && level_flight && tilt < 0.5 && (0.1..0.95).contains(&throttle) {
-        let level = throttle * libm::sqrtf(libm::cosf(tilt));
+        let level = throttle * at_ref * libm::sqrtf(libm::cosf(tilt));
         s.hover_throttle += (level - s.hover_throttle) * (dt / 1.5);
     }
 

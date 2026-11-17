@@ -39,23 +39,27 @@ fn generated_scenarios_hold_every_property_and_replay_identically() {
 /// which once left the tilt estimate 20-27 degrees off for seconds. Seed
 /// 209 rolls hard at 1 g soon after one, which a recovery that believed
 /// any 1 g reading once took for level.
+/// Seeds 741, 1360 and 1979 land by failsafe from 13-16 m and once touched
+/// down at 2.5-2.8 m/s: each descent probe of the trim left the descent
+/// faster with nothing above hover to slow it, and 1360's sagging pack,
+/// below where sag compensation is capped, could not hold even that.
 #[test]
 fn regression_seeds_hold_every_property() {
-    for seed in [1531, 822, 3007, 6875, 3934, 838, 88, 445, 519, 415, 109, 257, 209] {
+    for seed in [1531, 822, 3007, 6875, 3934, 838, 88, 445, 519, 415, 109, 257, 209, 741, 1360, 1979] {
         let r = run_seed(seed);
         assert!(r.violations.is_empty(), "seed {seed} [{}]: {:?}", r.name, r.violations);
     }
 }
 
-/// Seed 1444 loses the link at altitude while the board drops 1% of events.
-/// The monitor once let that unrelated event drop switch the failsafe
-/// checks off, which hid a 2.6 m/s failsafe touchdown; the landing must be
+/// Seed 1762 loses the link at altitude while the IMU timing jitters. The
+/// monitor once let an unrelated fault like that switch the failsafe checks
+/// off, which hid seed 1444 touching down at 2.6 m/s; this landing must be
 /// judged, and soft.
 #[test]
 fn failsafe_landing_is_judged_through_an_unrelated_fault() {
-    let r = run_seed(1444);
-    assert!(r.violations.is_empty(), "seed 1444 [{}]: {:?}", r.name, r.violations);
-    assert!(r.stats.live.get("failsafe_lands_softly").is_some_and(|&n| n > 0), "seed 1444: touchdown not judged: {:?}", r.stats.live);
+    let r = run_seed(1762);
+    assert!(r.violations.is_empty(), "seed 1762 [{}]: {:?}", r.name, r.violations);
+    assert!(r.stats.live.get("failsafe_lands_softly").is_some_and(|&n| n > 0), "seed 1762: touchdown not judged: {:?}", r.stats.live);
 }
 
 #[test]
