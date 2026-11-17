@@ -159,10 +159,11 @@ async fn init(spawner: Spawner) {
 
     let led = Output::new(p.PC13, Level::High, Speed::Low); // off
     let beeper = Output::new(p.PC15, Level::Low, Speed::Low);
-    let pin = |o: Peri<'static, AnyPin>| Output::new(o, Level::Low, Speed::Medium);
+    let idle = Level::from(dshot::Dshot::IDLE_HIGH);
+    let pin = |o: Peri<'static, AnyPin>| Output::new(o, idle, Speed::Medium);
     let motors = dshot::Dshot::new(p.TIM1, p.DMA2_CH5, [pin(p.PB10.into()), pin(p.PB6.into()), pin(p.PB7.into()), pin(p.PB8.into())]);
     // The firmware streams stop commands from the first IMU sample; until
-    // then the ESCs see an idle-low line, which they treat as no signal.
+    // then the ESCs see an idle line, which they treat as no signal.
 
     let mut spi_cfg = spi::Config::default();
     spi_cfg.mode = spi::MODE_3;
@@ -194,6 +195,10 @@ async fn init(spawner: Spawner) {
     // Fed by the control loop at least every millisecond. The LSI clock is
     // 17-47 kHz, so 50 ms nominal is 34-94 ms.
     let watchdog = IndependentWatchdog::new(p.IWDG, 50_000);
+    // The battery pins become analog inputs before DShot starts: that
+    // rewrites GPIOB's mode register, which the DShot interrupt also does
+    // around every reply window, without a lock.
+    let (vbat, ibat) = (p.PB0.degrade_adc(), p.PB1.degrade_adc());
     let control = CONTROL.start(interrupt::SPI5);
     control.spawn(control::control_task(config, imu, drdy, motors, led, beeper, watchdog).unwrap());
 
@@ -206,5 +211,5 @@ async fn init(spawner: Spawner) {
     }
 
     let adc = Adc::new(p.ADC1);
-    spawner.spawn(battery_task(adc, p.PB0.degrade_adc(), p.PB1.degrade_adc()).unwrap());
+    spawner.spawn(battery_task(adc, vbat, ibat).unwrap());
 }

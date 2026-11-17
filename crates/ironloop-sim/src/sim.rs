@@ -8,6 +8,7 @@ use std::cmp::Reverse;
 use std::collections::{BinaryHeap, VecDeque};
 
 use ironloop_fc::math::{Vec3, tilt_error, up_in_body};
+use ironloop_fc::proto::{decode_erpm_reply, erpm_reply};
 use ironloop_fc::{
     Effect, Event, EventKind, FlightMode, ImuAlignment, Notice, RC_CHANNELS, State, Status, step,
 };
@@ -336,8 +337,16 @@ impl Sim {
                     let m = if self.sc.motors_swapped { [1, 0, 2, 3][i] } else { i };
                     let lost = self.rng_esc.chance(self.sc.telemetry_loss);
                     if !lost_all && !lost && self.world.motors[m].command != 0 {
+                        // The ESC measures the commutation period and sends
+                        // it as a GCR reply. A glitch on the wire adds two
+                        // edges; the checksum rejects most of those, but
+                        // about 1% read as a wrong eRPM.
                         let noise = 1.0 + 0.01 * self.rng_esc.normal();
-                        *e = Some((self.world.erpm(m) as f32 * noise) as u32);
+                        let mut reply = erpm_reply((self.world.erpm(m) as f32 * noise) as u32);
+                        if self.rng_esc.chance(self.sc.telemetry_loss) {
+                            reply ^= 0b11 << self.rng_esc.range_u64(0, 19);
+                        }
+                        *e = decode_erpm_reply(reply);
                     }
                 }
                 if erpm.iter().any(Option::is_some) {

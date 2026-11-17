@@ -27,8 +27,11 @@ jobs:
         with:
           workspaces: firmware/mobula6
       # The board crate is its own workspace; warnings fail the build.
+      # --config adds to the rustflags in firmware/mobula6/.cargo/config.toml
+      # (RUSTFLAGS would replace them).
       - name: Build the Mobula6 firmware
         working-directory: firmware/mobula6
-        env:
-          RUSTFLAGS: -D warnings -C link-arg=-Tlink.x -C target-cpu=cortex-m4
-        run: cargo build --release
+        run: |
+          deny='target.thumbv7em-none-eabihf.rustflags=["-D", "warnings"]'
+          cargo build --release --config "$deny"
+          cargo build --release --features no-erpm --config "$deny"

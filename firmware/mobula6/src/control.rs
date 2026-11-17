@@ -5,7 +5,8 @@
 //!   when the sensor had it, whatever the loop was doing. If the loop has not
 //!   read the previous sample yet, that sample is lost and counted.
 //! - RC and battery events come from thread-mode tasks through `EVENTS`.
-//! - `Tick` comes from the loop's own 1 ms timer. Nothing else produces one:
+//! - `Tick` comes from the loop's own 1 ms timer, along with the ESCs'
+//!   eRPM collected since the last one. Nothing else produces one:
 //!   a dead data-ready line gives ticks and no `Imu` events, so the
 //!   firmware's IMU timeout blocks arming or disarms.
 //!
@@ -130,35 +131,45 @@ pub async fn control_task(
                 if next_tick <= now {
                     next_tick = now + TICK;
                 }
-                Event { t_us: now.as_micros(), kind: EventKind::Tick }
+                let t_us = now.as_micros();
+                // The ESCs' eRPM since the last tick goes in just before it.
+                if let Some(erpm) = motors.take_telemetry() {
+                    let telemetry = Event { t_us, kind: EventKind::MotorTelemetry { erpm } };
+                    state = run(state, &telemetry, &mut motors, &mut led, &mut beeper);
+                }
+                Event { t_us, kind: EventKind::Tick }
             }
         };
+        state = run(state, &event, &mut motors, &mut led, &mut beeper);
+    }
+}
 
-        let start = DWT::cycle_count();
-        let (next, effects) = step(state, &event);
-        state = next;
-        // Only the last motor command of a step goes out: an earlier one
-        // would be superseded within microseconds anyway.
-        let mut command = None;
-        for effect in effects {
-            match effect {
-                Effect::Motors(m) => command = Some(m),
-                // Status LED on PC13 is active-low.
-                Effect::Led(on) => led.set_level(if on { Level::Low } else { Level::High }),
-                Effect::Beeper(on) => beeper.set_level(Level::from(on)),
-                Effect::Notice(_) => {}
-                Effect::RebootToBootloader => {
-                    motors.write([0; 4]);
-                    motors.wait_idle();
-                    crate::dfu::reboot();
-                }
+/// Steps the firmware on one event and applies its effects.
+fn run(state: State, event: &Event, motors: &mut dshot::Dshot, led: &mut Output<'static>, beeper: &mut Output<'static>) -> State {
+    let start = DWT::cycle_count();
+    let (state, effects) = step(state, event);
+    // Only the last motor command of a step goes out: an earlier one
+    // would be superseded within microseconds anyway.
+    let mut command = None;
+    for effect in effects {
+        match effect {
+            Effect::Motors(m) => command = Some(m),
+            // Status LED on PC13 is active-low.
+            Effect::Led(on) => led.set_level(if on { Level::Low } else { Level::High }),
+            Effect::Beeper(on) => beeper.set_level(Level::from(on)),
+            Effect::Notice(_) => {}
+            Effect::RebootToBootloader => {
+                motors.write([0; 4]);
+                motors.wait_idle();
+                crate::dfu::reboot();
             }
         }
-        if let Some(m) = command {
-            motors.write(m);
-        }
-        let cycles = DWT::cycle_count().wrapping_sub(start);
-        STATS.step_cycles_last.store(cycles, Relaxed);
-        STATS.step_cycles_max.fetch_max(cycles, Relaxed);
     }
+    if let Some(m) = command {
+        motors.write(m);
+    }
+    let cycles = DWT::cycle_count().wrapping_sub(start);
+    STATS.step_cycles_last.store(cycles, Relaxed);
+    STATS.step_cycles_max.fetch_max(cycles, Relaxed);
+    state
 }

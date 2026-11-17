@@ -179,8 +179,9 @@ pub struct Scenario {
     pub telemetry_loss: f32,
     /// Motor wires swapped (M1↔M2), a classic build mistake.
     pub motors_swapped: bool,
-    /// ESCs send bidirectional-DShot eRPM. The Mobula6 target does not
-    /// implement it yet, so many seeds run without.
+    /// ESCs send bidirectional-DShot eRPM. Some builds run without it
+    /// (ESC firmware without bidirectional DShot, or a board build that has
+    /// it off), so the firmware must work either way.
     pub esc_telemetry: bool,
     /// Added to every timestamp the firmware sees, e.g. to wrap a u32 µs
     /// clock mid-flight.
@@ -363,7 +364,7 @@ impl Scenario {
             tags.push("imu-misaligned".into());
         }
         if r.chance(0.4) {
-            // Like the current Mobula6 target: no bidirectional DShot.
+            // No bidirectional DShot: older ESC firmware, or turned off.
             sc.esc_telemetry = false;
             tags.push("no-telemetry".into());
         }
