@@ -11,7 +11,12 @@
 //! - `rc_task`, thread mode: ELRS CRSF bytes on USART2 → `Rc` event
 //! - `battery_task`, thread mode: ADC VBAT/current at 50 Hz → `Battery` event
 //!
-//! Pinout and clocking come from docs/hardware notes for this board; see
+//! A panic or a hung control loop (through the independent watchdog) resets
+//! the board. The ESCs stop on the missing DShot signal, and after the reset
+//! arming needs the arm switch seen off first, so a reset in flight cannot
+//! re-arm by itself.
+//!
+//! Pinout and clocking come from docs/hardware/mobula6-eco-2024.md; see the
 //! README for what still needs a bench check.
 
 #![no_std]
@@ -19,13 +24,12 @@
 
 mod bmi270_config;
 mod control;
+mod dfu;
 mod dshot;
 mod imu;
 
-use core::mem::MaybeUninit;
-
 use control::send;
-use embassy_executor::{InterruptExecutor, Spawner};
+use embassy_executor::{Executor, InterruptExecutor, Spawner};
 use embassy_stm32::Peri;
 use embassy_stm32::adc::{Adc, AdcChannel, AnyAdcChannel, SampleTime};
 use embassy_stm32::exti::{ExtiInput, TriggerEdge};
@@ -35,11 +39,11 @@ use embassy_stm32::peripherals::{ADC1, DMA1_CH5, DMA2_CH0, DMA2_CH3, USART2};
 use embassy_stm32::spi::{self, Spi};
 use embassy_stm32::time::Hertz;
 use embassy_stm32::usart::{self, RingBufferedUartRx, UartRx};
+use embassy_stm32::wdg::IndependentWatchdog;
 use embassy_stm32::{bind_interrupts, dma, interrupt};
 use embassy_time::{Duration, Ticker};
-use ironloop_fc::EventKind;
 use ironloop_fc::proto::CrsfParser;
-use panic_halt as _;
+use ironloop_fc::{Config, EventKind};
 use static_cell::StaticCell;
 
 bind_interrupts!(struct Irqs {
@@ -57,42 +61,6 @@ static CONTROL: InterruptExecutor = InterruptExecutor::new();
 unsafe fn SPI5() {
     // SAFETY: SPI5 is the interrupt `CONTROL` was started on.
     unsafe { CONTROL.on_interrupt() }
-}
-
-// ---- DFU bootloader entry -------------------------------------------------
-//
-// The SWD clock pin doubles as the blackbox flash chip-select on this board,
-// so reflashing goes through the ROM USB DFU bootloader. The firmware asks for
-// it with `Effect::RebootToBootloader` (a disarmed stick gesture). We set a
-// flag in RAM that survives reset, reset, and jump before anything else
-// touches the clocks or peripherals.
-
-const BOOT_MAGIC: u32 = 0xB007_10AD;
-const SYSTEM_MEMORY: u32 = 0x1FFF_0000;
-
-#[unsafe(link_section = ".uninit.BOOTFLAG")]
-static mut BOOT_FLAG: MaybeUninit<u32> = MaybeUninit::uninit();
-
-fn jump_to_bootloader_if_requested() {
-    // SAFETY: single-threaded, before any interrupt is enabled.
-    unsafe {
-        let flag = (&raw mut BOOT_FLAG).cast::<u32>();
-        if core::ptr::read_volatile(flag) != BOOT_MAGIC {
-            return;
-        }
-        core::ptr::write_volatile(flag, 0);
-        // Map system memory at 0x0 the way the ROM bootloader expects.
-        let rcc = embassy_stm32::pac::RCC;
-        rcc.apb2enr().modify(|w| w.set_syscfgen(true));
-        embassy_stm32::pac::SYSCFG.memrm().modify(|w| w.set_mem_mode(1));
-        cortex_m::asm::bootload(SYSTEM_MEMORY as *const u32);
-    }
-}
-
-pub fn reboot_to_bootloader() -> ! {
-    // SAFETY: plain volatile store to a word only this module uses.
-    unsafe { core::ptr::write_volatile((&raw mut BOOT_FLAG).cast::<u32>(), BOOT_MAGIC) };
-    cortex_m::peripheral::SCB::sys_reset();
 }
 
 // ---- Tasks ----------------------------------------------------------------
@@ -118,16 +86,26 @@ async fn rc_task(mut rx: RingBufferedUartRx<'static>) {
 
 #[embassy_executor::task]
 async fn battery_task(mut adc: Adc<'static, ADC1>, mut vbat: AnyAdcChannel<'static, ADC1>, mut ibat: AnyAdcChannel<'static, ADC1>) {
-    const VREF: f32 = 3.3;
     const VBAT_DIVIDER: f32 = 11.0; // Betaflight vbat_scale 110
-    const AMPS_PER_VOLT: f32 = 1.0 / 0.047; // ibata_scale 470; reads ~25% high, calibrate
+    // Betaflight's ibata_scale 470 is 47 mV/A, but on this quad it reads
+    // about 25% high against a meter (QuadMath), so 47 × 1.25 mV/A.
+    const AMPS_PER_VOLT: f32 = 1.0 / (0.047 * 1.25);
+    // The internal reference's reading at 3.3 V, measured in the factory
+    // (STM32F411 datasheet, "Internal reference voltage calibration values").
+    // SAFETY: a read-only word in system memory.
+    let vrefint_cal = unsafe { core::ptr::read_volatile(0x1FFF_7A2A as *const u16) } as f32;
+    let mut vrefint = adc.enable_vrefint();
     let mut ticker = Ticker::every(Duration::from_millis(20));
     loop {
         ticker.next().await;
+        // The ADC's reference is the 3.3 V rail, whose own error would
+        // otherwise become battery-voltage (and so throttle-gain) error.
+        let raw_ref = adc.blocking_read(&mut vrefint, SampleTime::CYCLES480).max(1);
+        let volts_per_count = 3.3 * vrefint_cal / raw_ref as f32 / 4095.0;
         let raw_v = adc.blocking_read(&mut vbat, SampleTime::CYCLES112);
         let raw_i = adc.blocking_read(&mut ibat, SampleTime::CYCLES112);
-        let volts = raw_v as f32 * (VREF / 4095.0) * VBAT_DIVIDER;
-        let amps = raw_i as f32 * (VREF / 4095.0) * AMPS_PER_VOLT;
+        let volts = raw_v as f32 * volts_per_count * VBAT_DIVIDER;
+        let amps = raw_i as f32 * volts_per_count * AMPS_PER_VOLT;
         send(EventKind::Battery { volts, amps });
     }
 }
@@ -156,9 +134,21 @@ fn clocks() -> embassy_stm32::Config {
 
 static CRSF_DMA_BUF: StaticCell<[u8; 256]> = StaticCell::new();
 
-#[embassy_executor::main]
-async fn main(spawner: Spawner) {
-    jump_to_bootloader_if_requested();
+#[panic_handler]
+fn panic(_: &core::panic::PanicInfo) -> ! {
+    cortex_m::peripheral::SCB::sys_reset()
+}
+
+#[cortex_m_rt::entry]
+fn main() -> ! {
+    // First, before the clocks or any peripheral are touched.
+    dfu::jump_if_requested();
+    static EXECUTOR: StaticCell<Executor> = StaticCell::new();
+    EXECUTOR.init(Executor::new()).run(|spawner| spawner.spawn(init(spawner).unwrap()))
+}
+
+#[embassy_executor::task]
+async fn init(spawner: Spawner) {
     let p = embassy_stm32::init(clocks());
 
     if let Some(mut core) = cortex_m::Peripherals::take() {
@@ -182,6 +172,13 @@ async fn main(spawner: Spawner) {
     // Without an IMU no `Imu` events arrive, so the firmware reports the
     // IMU arming blocker and never spins the motors.
     let imu = imu::Imu::init(spi, cs).await.ok();
+    // The board knows its sensor; the firmware's defaults do not.
+    let config = Config {
+        gyro_range: imu::GYRO_RANGE,
+        accel_range: imu::ACCEL_RANGE,
+        imu_alignment: imu.as_ref().map_or(Config::default().imu_alignment, imu::Imu::alignment),
+        ..Config::default()
+    };
 
     // The control loop starts only now, so gyro calibration (timed from the
     // first event) does not run while the IMU is still being set up.
@@ -194,11 +191,15 @@ async fn main(spawner: Spawner) {
     // with code that relies on it being masked.
     unsafe { interrupt::EXTI1.enable() };
     interrupt::SPI5.set_priority(Priority::P1);
+    // Fed by the control loop at least every millisecond. The LSI clock is
+    // 17-47 kHz, so 50 ms nominal is 34-94 ms.
+    let watchdog = IndependentWatchdog::new(p.IWDG, 50_000);
     let control = CONTROL.start(interrupt::SPI5);
-    control.spawn(control::control_task(imu, drdy, motors, led, beeper).unwrap());
+    control.spawn(control::control_task(config, imu, drdy, motors, led, beeper, watchdog).unwrap());
 
     let mut uart_cfg = usart::Config::default();
     uart_cfg.baudrate = 420_000; // CRSF
+    // Without the receiver no `Rc` events arrive: the RC link arming blocker.
     if let Ok(rx) = UartRx::new(p.USART2, p.PA3, p.DMA1_CH5, Irqs, uart_cfg) {
         let rx = rx.into_ring_buffered(CRSF_DMA_BUF.init([0; 256]));
         spawner.spawn(rc_task(rx).unwrap());

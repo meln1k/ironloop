@@ -8,7 +8,8 @@ means the workload or the properties miss a real-world case.
 Usage: scripts/mutants.py [seeds] [name filter]   (default 300; run from anywhere)
 
 For the unmodified firmware and then each mutant this runs the DST sweep,
-the firmware unit tests, and the simulator tests. A mutant is caught when
+the firmware unit tests, and the simulator tests, and builds the Mobula6
+board firmware (a core change it no longer compiles against). A mutant is caught when
 any of them fails where the unmodified firmware passed: a new failing test
 or property, or more seeds failing a property that already fails. The
 source files are restored after every mutant, even on Ctrl-C or SIGTERM.
@@ -142,6 +143,11 @@ def check(seeds):
             fails.add((m.group(1), int(m.group(2))))
         elif line.startswith("  FAIL  ") or line.startswith("  THIN  "):
             fails.add((line.strip(), 0))
+    # Type-checking is enough to see a core change break the board, and
+    # skips the firmware's fat-LTO link on every mutant.
+    fw = subprocess.run(["cargo", "check", "-q"], cwd="firmware/mobula6", capture_output=True, text=True)
+    if fw.returncode != 0:
+        fails.add(("firmware build", 0))
     for pkg, extra in (("ironloop-fc", []), ("ironloop-sim", ["--test", "dst"])):
         t = run(["cargo", "test", "-q", "--release", "-p", pkg] + extra)
         fails |= {(l.split()[1], 0) for l in t.stdout.splitlines() if l.startswith("test ") and l.endswith("FAILED")}

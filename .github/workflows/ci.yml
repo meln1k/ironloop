@@ -1,0 +1,34 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # Includes a 24-seed DST sweep, the regression seeds, and the paired
+      # runs. Larger sweeps still have known failures (README, Known limits).
+      - name: Unit tests and DST
+        run: cargo test --release -p ironloop-fc -p ironloop-sim
+
+  firmware:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: thumbv7em-none-eabihf
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: firmware/mobula6
+      # The board crate is its own workspace; warnings fail the build.
+      - name: Build the Mobula6 firmware
+        working-directory: firmware/mobula6
+        env:
+          RUSTFLAGS: -D warnings -C link-arg=-Tlink.x -C target-cpu=cortex-m4
+        run: cargo build --release

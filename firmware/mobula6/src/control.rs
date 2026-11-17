@@ -18,12 +18,14 @@ use embassy_futures::select::{Either3, select3};
 use embassy_stm32::exti::ExtiInput;
 use embassy_stm32::gpio::{Level, Output};
 use embassy_stm32::mode::Blocking;
+use embassy_stm32::peripherals::IWDG;
+use embassy_stm32::wdg::IndependentWatchdog;
 use embassy_stm32::{interrupt, pac};
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::Channel;
 use embassy_sync::signal::Signal;
 use embassy_time::{Duration, Instant, Timer};
-use ironloop_fc::{Effect, Event, EventKind, State, step};
+use ironloop_fc::{Config, Effect, Event, EventKind, State, step};
 
 use crate::{dshot, imu};
 
@@ -87,17 +89,23 @@ fn EXTI1() {
 
 #[embassy_executor::task]
 pub async fn control_task(
+    config: Config,
     mut imu: Option<imu::Imu>,
     _drdy: ExtiInput<'static, Blocking>,
     mut motors: dshot::Dshot,
     mut led: Output<'static>,
     mut beeper: Output<'static>,
+    mut watchdog: IndependentWatchdog<'static, IWDG>,
 ) {
-    let mut state = State::default();
+    let mut state = State::new(config);
+    watchdog.unleash();
     // Edges during IMU set-up carry no sample worth a step.
     DRDY.reset();
     let mut next_tick = Instant::now() + TICK;
     loop {
+        // Every pass takes at most about a millisecond (the tick), so a
+        // loop that stops passing here is hung.
+        watchdog.pet();
         // Queued RC and battery events go first: they were stamped before
         // anything the loop has not yet seen, so time stays in order even
         // after a long step.
@@ -142,7 +150,7 @@ pub async fn control_task(
                 Effect::RebootToBootloader => {
                     motors.write([0; 4]);
                     motors.wait_idle();
-                    crate::reboot_to_bootloader();
+                    crate::dfu::reboot();
                 }
             }
         }

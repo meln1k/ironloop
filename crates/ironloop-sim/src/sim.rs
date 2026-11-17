@@ -323,8 +323,8 @@ impl Sim {
                 } else {
                     ((b.volts + 0.01 * self.rng_esc.normal()) * gain * 100.0).round() / 100.0
                 };
-                // The Mobula6 current sensor reads about 25% high.
-                let amps = b.amps * 1.25;
+                // The board corrects the Mobula6 current sensor's 25% error.
+                let amps = b.amps;
                 self.deliver(EventKind::Battery { volts, amps });
                 self.schedule(t + BATTERY_US, Ev::Battery);
             }

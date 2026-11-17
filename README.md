@@ -29,6 +29,7 @@ Airmode engages above 25% throttle. Arming (channel 5 high) needs: gyro calibrat
 
 ```sh
 cargo test -p ironloop-fc -p ironloop-sim                   # unit tests + 24-seed DST sweep
+(cd firmware/mobula6 && cargo build --release)              # board firmware (needs thumbv7em-none-eabihf)
 cargo run --release -p ironloop-sim --bin dst -- --seeds 1000
 cargo run --release -p ironloop-sim --bin dst -- --seed 626 --trace   # replay one seed with a 20 Hz flight log
 cargo run --release -p ironloop-sim --bin dst -- --properties
@@ -141,7 +142,11 @@ dfu-util -a 0 -s 0x08000000:leave -D ironloop.bin
 
 Enter DFU by holding the BOOT pad while plugging in USB, or from IronLoop itself: disarmed, arm switch off, throttle low, yaw full left, pitch full back, roll full right, held for 2 s. SWD is unavailable on this board (SWCLK doubles as the flash chip-select). To go back to Betaflight, flash target CRAZYBEEF4DX and restore Happymodel's CLI dump.
 
-**Not yet verified on hardware.** Before props go on, check on the bench: which IMU is fitted and its axis orientation (tilt the quad, watch attitude), motor order and direction, DShot reaching the ESCs, battery voltage scaling, and LED/beeper polarity. Then the timing checks, from the counters in `control::STATS` (IMU samples, missed data-ready edges, SPI read errors, dropped events, and `step` cycles from the DWT counter). SWD is unavailable, so they need the planned USB diagnostics to read them.
+CI (`.github/workflows/ci.yml`) runs those tests and builds the board firmware with warnings as errors; `scripts/mutants.py` also counts a core change that breaks the firmware build. Hardware facts and sources for this board are in `docs/hardware/mobula6-eco-2024.md`.
+
+The board builds the firmware's `Config` from the IMU it finds: the gyro and accelerometer ranges it programs, and the chip's mounting (CW0 for both chips, from Happymodel's factory dump). A panic, or the control loop missing the independent watchdog for about 50 ms, resets the board; the ESCs stop on the missing signal, and arming afterwards needs the arm switch seen off first.
+
+**Not yet verified on hardware.** Before props go on, check on the bench: which IMU is fitted and its axis orientation, on a BMI270 board and on an ICM-42688 board (tilt the quad, watch attitude), motor order and direction, DShot reaching the ESCs, battery voltage scaling, and LED/beeper polarity. Then the timing checks, from the counters in `control::STATS` (IMU samples, missed data-ready edges, SPI read errors, dropped events, and `step` cycles from the DWT counter). SWD is unavailable, so they need the planned USB diagnostics to read them.
 
 - IMU rate: samples grow at 3.2 kHz with a BMI270 or 2 kHz with an ICM-42688, and missed data-ready edges stay at zero.
 - Step time: the longest `step` (`step_cycles_max`, at 96 MHz) stays well under the sample period (312 µs, 30,000 cycles, for the BMI270), including during stick moves, arming, and disarming.

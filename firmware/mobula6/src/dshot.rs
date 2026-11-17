@@ -23,8 +23,8 @@ use embassy_stm32::timer::low_level::{RoundTo, Timer};
 use ironloop_fc::proto::dshot_frame;
 
 const SLOTS_PER_BIT: usize = 3;
-/// 16 bits plus two idle slots so the line ends low.
-const WORDS: usize = 16 * SLOTS_PER_BIT + 2;
+/// 16 bits; each bit's last slot drives every pin low, so the frame ends low.
+const WORDS: usize = 16 * SLOTS_PER_BIT;
 /// GPIOB bit per motor, Betaflight order (RR, FR, RL, FL).
 const PINS: [u32; 4] = [1 << 10, 1 << 6, 1 << 7, 1 << 8];
 const ALL: u32 = PINS[0] | PINS[1] | PINS[2] | PINS[3];
@@ -76,8 +76,6 @@ impl Dshot {
             table[bit * SLOTS_PER_BIT + 1] = zeros << 16; // reset: 0-bits low
             table[bit * SLOTS_PER_BIT + 2] = ALL << 16; // reset: all low
         }
-        table[WORDS - 2] = 0;
-        table[WORDS - 1] = 0;
 
         pac::DMA2.ifcr(STREAM / 4).write(|w| {
             let i = STREAM % 4;

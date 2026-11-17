@@ -3,23 +3,68 @@
 //!
 //! Samples come out in the sensor's own axes converted to the firmware's
 //! FRD convention for a chip mounted with x forward and z up (x, -y, -z);
-//! any further mounting rotation is the firmware's `imu_alignment` setting.
-//! Both the axis convention and the alignment need a bench check on the real
-//! quad (tilt it and watch the attitude).
+//! any further mounting rotation is [`Imu::alignment`], which the board
+//! puts in the firmware's `Config` along with the ranges below. Both the axis
+//! convention and the alignment need a bench check on the real quad, on a
+//! BMI270 batch and on an ICM-42688 batch (tilt it and watch the attitude).
 
 use embassy_stm32::gpio::Output;
 use embassy_stm32::mode::Async;
 use embassy_stm32::spi::{self, Spi, mode::Master};
 use embassy_stm32::time::Hertz;
 use embassy_time::Timer;
+use ironloop_fc::ImuAlignment;
 
 use crate::bmi270_config::BMI270_CONFIG;
 
 const GRAVITY: f32 = 9.80665;
-/// ±16 g: 2048 LSB/g on both chips.
-const ACCEL_SCALE: f32 = GRAVITY / 2048.0;
-/// ±2000 deg/s: 16.4 LSB per deg/s on both chips.
-const GYRO_SCALE: f32 = core::f32::consts::PI / 180.0 / 16.4;
+
+/// Full-scale ranges. These are written into both chips' range registers
+/// (below) and given to the firmware's `Config`, so its saturation and
+/// spike checks always use the range the sensor really has.
+const GYRO_RANGE_DPS: u16 = 2000;
+const ACCEL_RANGE_G: u8 = 16;
+/// Gyro range in rad/s.
+pub const GYRO_RANGE: f32 = GYRO_RANGE_DPS as f32 * core::f32::consts::PI / 180.0;
+/// Accelerometer range in m/s².
+pub const ACCEL_RANGE: f32 = ACCEL_RANGE_G as f32 * GRAVITY;
+/// Both chips give 16-bit samples spanning ±range: 16.384 LSB per deg/s
+/// at ±2000 deg/s, which the datasheets round to 16.4 (Betaflight also uses
+/// range / 2^15).
+const GYRO_SCALE: f32 = GYRO_RANGE / 32768.0;
+const ACCEL_SCALE: f32 = ACCEL_RANGE / 32768.0;
+
+/// Range register fields for `GYRO_RANGE_DPS` and `ACCEL_RANGE_G`; another
+/// range is a compile error rather than a silent mismatch.
+const BMI_GYR_RANGE: u8 = match GYRO_RANGE_DPS {
+    2000 => 0,
+    1000 => 1,
+    500 => 2,
+    250 => 3,
+    _ => panic!("unsupported gyro range"),
+};
+const BMI_ACC_RANGE: u8 = match ACCEL_RANGE_G {
+    2 => 0,
+    4 => 1,
+    8 => 2,
+    16 => 3,
+    _ => panic!("unsupported accel range"),
+};
+/// ICM-42688 GYRO_FS_SEL / ACCEL_FS_SEL (bits 7:5), with ODR 2 kHz (0x5).
+const ICM_GYRO_CONFIG0: u8 = match GYRO_RANGE_DPS {
+    2000 => 0,
+    1000 => 1,
+    500 => 2,
+    250 => 3,
+    _ => panic!("unsupported gyro range"),
+} << 5 | 0x05;
+const ICM_ACCEL_CONFIG0: u8 = match ACCEL_RANGE_G {
+    16 => 0,
+    8 => 1,
+    4 => 2,
+    2 => 3,
+    _ => panic!("unsupported accel range"),
+} << 5 | 0x05;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Chip {
@@ -27,17 +72,15 @@ pub enum Chip {
     Icm42688,
 }
 
+/// No usable IMU: an SPI error, an unknown chip ID, or a BMI270 that
+/// rejected its configuration. The firmware reports it as the IMU arming
+/// blocker, since no samples arrive.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Error {
-    Spi,
-    NotFound,
-    /// BMI270 rejected its configuration upload.
-    InitFailed,
-}
+pub struct Error;
 
 impl From<spi::Error> for Error {
     fn from(_: spi::Error) -> Self {
-        Error::Spi
+        Error
     }
 }
 
@@ -67,7 +110,18 @@ impl Imu {
             imu.init_icm42688().await?;
             return Ok(imu);
         }
-        Err(Error::NotFound)
+        Err(Error)
+    }
+
+    /// How this chip sits on the board, as the firmware's `imu_alignment`.
+    /// Happymodel's factory Betaflight dumps for this quad set
+    /// `gyro_1_sensor_align = CW0` for both chips (the CrazyBee F4DX target
+    /// default is CW90). Unverified on hardware per chip; split this arm
+    /// if the bench shows the two footprints differ.
+    pub fn alignment(&self) -> ImuAlignment {
+        match self.chip {
+            Chip::Bmi270 | Chip::Icm42688 => ImuAlignment::Cw0,
+        }
     }
 
     fn set_speed(&mut self, hz: u32) {
@@ -116,13 +170,13 @@ impl Imu {
         let mut status = [0u8; 1];
         self.read(0x21, &mut status).await?; // INTERNAL_STATUS
         if status[0] & 0x0F != 0x01 {
-            return Err(Error::InitFailed);
+            return Err(Error);
         }
         self.write(0x7D, &[0x0E]).await?; // PWR_CTRL: accel, gyro, temp on
         self.write(0x40, &[0xAC]).await?; // ACC_CONF: 1600 Hz, normal filter, perf mode
-        self.write(0x41, &[0x03]).await?; // ACC_RANGE: ±16 g
+        self.write(0x41, &[BMI_ACC_RANGE]).await?; // ACC_RANGE
         self.write(0x42, &[0xED]).await?; // GYR_CONF: 3200 Hz, normal filter, perf mode
-        self.write(0x43, &[0x00]).await?; // GYR_RANGE: ±2000 deg/s
+        self.write(0x43, &[BMI_GYR_RANGE]).await?; // GYR_RANGE
         self.write(0x53, &[0x0A]).await?; // INT1_IO_CTRL: output, push-pull, active high
         self.write(0x58, &[0x04]).await?; // INT_MAP_DATA: data ready on INT1
         self.write(0x7C, &[0x02]).await?; // PWR_CONF: no power save
@@ -136,9 +190,11 @@ impl Imu {
         Timer::after_millis(2).await;
         self.write(0x4E, &[0x0F]).await?; // PWR_MGMT0: gyro + accel low-noise
         Timer::after_millis(1).await;
-        self.write(0x4F, &[0x05]).await?; // GYRO_CONFIG0: ±2000 deg/s, 2 kHz
-        self.write(0x50, &[0x05]).await?; // ACCEL_CONFIG0: ±16 g, 2 kHz
-        self.write(0x14, &[0x03]).await?; // INT_CONFIG: INT1 push-pull, active high, latched
+        self.write(0x4F, &[ICM_GYRO_CONFIG0]).await?; // GYRO_CONFIG0: range, 2 kHz
+        self.write(0x50, &[ICM_ACCEL_CONFIG0]).await?; // ACCEL_CONFIG0: range, 2 kHz
+        // INT_CONFIG: INT1 push-pull, active high, pulsed (bit 2 clear).
+        // Pulsed is what the edge-triggered data-ready interrupt needs.
+        self.write(0x14, &[0x03]).await?;
         self.write(0x64, &[0x00]).await?; // INT_CONFIG1: clear INT_ASYNC_RESET
         self.write(0x65, &[0x08]).await?; // INT_SOURCE0: UI data ready on INT1
         Timer::after_millis(50).await; // gyro start-up
