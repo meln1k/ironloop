@@ -8,6 +8,7 @@ use std::cmp::Reverse;
 use std::collections::{BinaryHeap, VecDeque};
 
 use ironloop_fc::math::{Vec3, tilt_error, up_in_body};
+use ironloop_fc::rc::{RcInput, Switch};
 use ironloop_fc::proto::{decode_erpm_reply, erpm_reply};
 use ironloop_fc::{
     Effect, Event, EventKind, FlightMode, ImuAlignment, Notice, RC_CHANNELS, State, Status, step,
@@ -50,17 +51,15 @@ pub struct Sticks {
 
 impl Sticks {
     pub fn channels(&self) -> [u16; RC_CHANNELS] {
-        let us = |x: f32| (1500.0 + 500.0 * x.clamp(-1.0, 1.0)) as u16;
-        [
-            us(self.roll),
-            us(self.pitch),
-            (1000.0 + 1000.0 * self.throttle.clamp(0.0, 1.0)) as u16,
-            us(self.yaw),
-            if self.arm { 2000 } else { 1000 },
-            if self.acro { 2000 } else { 1000 },
-            1500,
-            1500,
-        ]
+        RcInput {
+            roll: self.roll,
+            pitch: self.pitch,
+            yaw: self.yaw,
+            throttle: self.throttle,
+            arm: if self.arm { Switch::High } else { Switch::Low },
+            mode: if self.acro { FlightMode::Acro } else { FlightMode::Angle },
+        }
+        .channels()
     }
 }
 

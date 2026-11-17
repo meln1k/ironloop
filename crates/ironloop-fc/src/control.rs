@@ -63,7 +63,7 @@ pub(crate) fn control(s: &mut State, gyro: Vec3, accel: Vec3, dt: f32, reset: bo
     let leak = if s.failsafe == FailsafeStage::None { s.flight.vz_est / 4.0 } else { 0.0 };
     s.flight.vz_est += (down_accel - leak) * dt;
     let (roll, pitch, yaw, throttle) = match failsafe::throttle(s, dt) {
-        None => (s.rc.roll, s.rc.pitch, s.rc.yaw, s.rc.throttle),
+        None => (s.rc.input.roll, s.rc.input.pitch, s.rc.input.yaw, s.rc.input.throttle),
         Some(throttle) => (0.0, 0.0, 0.0, throttle),
     };
     s.flight.throttle_demand = throttle;

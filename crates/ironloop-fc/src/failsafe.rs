@@ -80,7 +80,7 @@ pub(crate) fn advance(s: &mut State, fx: &mut Out) {
             s.failsafe = FailsafeStage::Hold;
             s.failsafe_since_us = now;
             s.hold_vz_mark = None;
-            s.throttle_at_loss = s.rc.throttle;
+            s.throttle_at_loss = s.rc.input.throttle;
             fx.push(Effect::Notice(Notice::Failsafe(FailsafeStage::Hold)));
         }
         FailsafeStage::Hold | FailsafeStage::Landing if recovered => {

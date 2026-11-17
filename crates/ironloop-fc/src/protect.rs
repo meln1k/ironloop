@@ -31,7 +31,7 @@ pub(crate) fn runaway_and_crash(s: &mut State, gyro: Vec3, accel: Vec3, throttle
         // build that cannot fly speeds up away from the push. With the
         // sticks moved, only that counts; with them centred, any saturated
         // spin does (a tumble on the ground need not speed up).
-        let flown = s.rc.roll.abs().max(s.rc.pitch.abs()).max(s.rc.yaw.abs()) > 0.15;
+        let flown = s.rc.input.roll.abs().max(s.rc.input.pitch.abs()).max(s.rc.input.yaw.abs()) > 0.15;
         let p = s.flight.last_pid;
         let pushed_back = s.ang_accel.x * p.x + s.ang_accel.y * p.y < 0.0;
         let runaway = pid_high && spinning && (pushed_back || !flown);

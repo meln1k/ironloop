@@ -19,12 +19,15 @@ mod imu;
 pub mod math;
 mod protect;
 pub mod proto;
+pub mod rc;
 pub mod rpm;
 
 pub use config::{AxisPid, Config, ImuAlignment, Rates};
 use heapless::Vec;
 use imu::GyroCal;
 use math::{Lpf, Quat, Vec3};
+pub use rc::ch;
+use rc::RcInput;
 
 pub const RC_CHANNELS: usize = 8;
 /// Upper bound on effects produced by a single step.
@@ -47,18 +50,6 @@ pub const DSHOT_MAX: u16 = 2047;
 /// Throttle (0..1) at or below which the stick counts as down: arming is
 /// allowed, the I-term rests, and a link lost there was lost on the ground.
 const THROTTLE_LOW: f32 = 0.05;
-
-/// Channel order (AETR, as sent by ExpressLRS over CRSF).
-pub mod ch {
-    pub const ROLL: usize = 0;
-    pub const PITCH: usize = 1;
-    pub const THROTTLE: usize = 2;
-    pub const YAW: usize = 3;
-    /// High (>1700 µs) arms.
-    pub const ARM: usize = 4;
-    /// Low or centered selects Angle, high (>1700 µs) selects Acro.
-    pub const MODE: usize = 5;
-}
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Event {
@@ -210,12 +201,9 @@ struct Rc {
     last_valid_us: Option<u64>,
     /// Start of the current run of valid frames (no gap above the timeout).
     valid_since_us: u64,
-    roll: f32,
-    pitch: f32,
-    yaw: f32,
-    throttle: f32,
+    /// The latest valid frame.
+    input: RcInput,
     arm_switch: bool,
-    mode: FlightMode,
 }
 
 /// What the firmware knows about the current flight. Arming starts a new
@@ -366,14 +354,10 @@ impl State {
             rc: Rc {
                 last_valid_us: None,
                 valid_since_us: 0,
-                roll: 0.0,
-                pitch: 0.0,
-                yaw: 0.0,
-                throttle: 0.0,
+                input: RcInput { roll: 0.0, pitch: 0.0, yaw: 0.0, throttle: 0.0, arm: rc::Switch::High, mode: FlightMode::Angle },
                 // Assume the switch is on until we see it off, so a switch
                 // left on at power-up can never arm.
                 arm_switch: true,
-                mode: FlightMode::Angle,
             },
             failsafe: FailsafeStage::None,
             failsafe_since_us: 0,
@@ -429,7 +413,7 @@ impl State {
     }
 
     fn effective_mode(&self) -> FlightMode {
-        if self.failsafe != FailsafeStage::None { FlightMode::Angle } else { self.rc.mode }
+        if self.failsafe != FailsafeStage::None { FlightMode::Angle } else { self.rc.input.mode }
     }
 
     fn rc_lost(&self) -> bool {
@@ -451,7 +435,7 @@ impl State {
         if !self.cal.done {
             b |= ArmBlockers::CALIBRATING;
         }
-        if self.rc.throttle > THROTTLE_LOW {
+        if self.rc.input.throttle > THROTTLE_LOW {
             b |= ArmBlockers::THROTTLE;
         }
         if self.rc_lost() {
@@ -577,48 +561,29 @@ fn disarm(s: &mut State, reason: DisarmReason, fx: &mut Out) {
     fx.push(Effect::Notice(Notice::Disarmed(reason)));
 }
 
-fn stick(us: u16) -> f32 {
-    ((us as f32 - 1500.0) / 500.0).clamp(-1.0, 1.0)
-}
-
 fn on_rc(s: &mut State, channels: &[u16; RC_CHANNELS], fx: &mut Out) {
-    // A frame with any channel outside the plausible pulse range is
-    // corrupted; drop it rather than act on it.
-    if channels.iter().any(|&c| !(880..=2120).contains(&c)) {
+    // A corrupted frame is dropped rather than acted on.
+    let Some(input) = RcInput::decode(channels) else {
         fx.push(Effect::Notice(Notice::RcFrameRejected));
         return;
-    }
+    };
     let now = s.now_us;
     if s.rc_lost() {
         s.rc.valid_since_us = now;
     }
     s.rc.last_valid_us = Some(now);
-    let deadband = |x: f32| if x.abs() < 0.01 { 0.0 } else { x };
-    s.rc.roll = deadband(stick(channels[ch::ROLL]));
-    s.rc.pitch = deadband(stick(channels[ch::PITCH]));
-    s.rc.yaw = deadband(stick(channels[ch::YAW]));
-    s.rc.throttle = ((channels[ch::THROTTLE] as f32 - 1000.0) / 1000.0).clamp(0.0, 1.0);
-
-    let mode = if channels[ch::MODE] > 1700 { FlightMode::Acro } else { FlightMode::Angle };
-    if mode != s.rc.mode {
-        s.rc.mode = mode;
-        fx.push(Effect::Notice(Notice::ModeChanged(mode)));
+    if input.mode != s.rc.input.mode {
+        fx.push(Effect::Notice(Notice::ModeChanged(input.mode)));
     }
+    s.rc.input = input;
 
-    let gesture = channels[ch::ARM] < 1300
-        && channels[ch::THROTTLE] < 1050
-        && channels[ch::YAW] < 1100
-        && channels[ch::PITCH] < 1100
-        && channels[ch::ROLL] > 1900;
-    if held_for(&mut s.boot_gesture_since_us, gesture && !s.armed, now) >= 2_000_000 {
+    if held_for(&mut s.boot_gesture_since_us, input.boot_gesture() && !s.armed, now) >= 2_000_000 {
         s.boot_gesture_since_us = None;
         fx.push(Effect::RebootToBootloader);
     }
 
-    let arm = channels[ch::ARM];
     let was_on = s.rc.arm_switch;
-    // Hysteresis so a noisy switch channel cannot chatter.
-    let on = if was_on { arm > 1300 } else { arm > 1700 };
+    let on = input.arm.arm_on(was_on);
     s.rc.arm_switch = on;
     if !on && s.armed {
         disarm(s, DisarmReason::Switch, fx);
@@ -636,7 +601,7 @@ fn on_rc(s: &mut State, channels: &[u16; RC_CHANNELS], fx: &mut Out) {
             // controller, the keep-alive tick repeats this command; left at
             // the disarmed zeros it would hold the motors stopped while armed.
             s.motors = [control::dshot(s.cfg.motor_idle); 4];
-            fx.push(Effect::Notice(Notice::Armed(s.rc.mode)));
+            fx.push(Effect::Notice(Notice::Armed(s.rc.input.mode)));
         } else {
             fx.push(Effect::Notice(Notice::ArmingBlocked(blockers)));
         }
