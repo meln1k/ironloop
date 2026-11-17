@@ -808,8 +808,11 @@ fn control(s: &mut State, gyro: Vec3, accel: Vec3, dt: f32, reset: bool, fx: &mu
     // motion over a few seconds (without a barometer a steady climb looks
     // like hover) but showing climbs and descents as they start and end.
     // It reads g * (1 - cos e) too low for an attitude estimate off by e,
-    // which in hard maneuvering adds up to a m/s or two. So failsafe starts
-    // it from zero when the link is lost and integrates without leaking.
+    // which in hard maneuvering adds up to a m/s or two, but the leak
+    // forgets that within a few seconds. Failsafe keeps the estimate it had
+    // when the link was lost (the quad is often already climbing or
+    // sinking; starting from zero would read that error for the whole
+    // landing) and integrates without leaking.
     let down_accel = s.attitude.rotate(accel).z + s.cal.accel_1g;
     let leak = if s.failsafe == FailsafeStage::None { s.vz_est / 4.0 } else { 0.0 };
     s.vz_est += (down_accel - leak) * dt;
@@ -823,15 +826,17 @@ fn control(s: &mut State, gyro: Vec3, accel: Vec3, dt: f32, reset: bool, fx: &mu
         // 92% of hover thrust). The hold also measures how far the learned
         // hover throttle is off (see housekeeping). During the landing a
         // fast sink brakes; the integrated accelerometer drifts (vibration),
-        // so the brake's ceiling falls from 115% to 96% of hover over the
-        // first 6 s and a drifting estimate cannot hold the quad up.
+        // so the brake's ceiling falls from 115% of hover to hover itself
+        // over the first 4 s: a drifting estimate can then at most hold the
+        // quad, and the trim below still takes it down. Below hover nothing
+        // could stop a long descent speeding up.
         // Throttle at the bottom when the link went means the quad is on the
         // ground (or the pilot cut it): never spin up from there.
         FailsafeStage::Hold if s.throttle_at_loss < 0.05 => (0.0, 0.0, 0.0, 0.0),
         FailsafeStage::Hold => (0.0, 0.0, 0.0, s.hover_throttle),
         FailsafeStage::Landing => {
             let landing_s = s.now_us.saturating_sub(s.failsafe_since_us) as f32 * 1e-6;
-            let ceiling = (1.15 - 0.04 * landing_s).max(0.98);
+            let ceiling = (1.15 - 0.04 * landing_s).max(1.0);
             if s.now_us.saturating_sub(s.landing_vz_ref.0) >= 250_000 {
                 s.landing_accel = (s.vz_est - s.landing_vz_ref.1) / 0.25;
                 s.landing_vz_ref = (s.now_us, s.vz_est);
@@ -1271,7 +1276,6 @@ fn housekeeping(s: &mut State, fx: &mut Out) {
         FailsafeStage::None if lost && s.armed => {
             s.failsafe = FailsafeStage::Hold;
             s.failsafe_since_us = now;
-            s.vz_est = 0.0;
             s.hold_vz_mark = None;
             s.throttle_at_loss = s.rc.throttle;
             push(fx, Effect::Notice(Notice::Failsafe(FailsafeStage::Hold)));

@@ -32,9 +32,12 @@ fn generated_scenarios_hold_every_property_and_replay_identically() {
 /// which the attitude estimate's error once made look like rolling.
 /// Seed 445 loses a motor, sits on the ground, and is flipped over where it
 /// stands by the pilot with no impact, which once never counted as lying.
+/// Seeds 519 and 415 land by failsafe from 10-13 m, which once sped up past
+/// 2.5 m/s: the brake stopped at 98% of hover, and the speed estimate
+/// started from zero at link loss although the quad was already moving.
 #[test]
 fn regression_seeds_hold_every_property() {
-    for seed in [1531, 822, 3007, 6875, 3934, 838, 88, 445] {
+    for seed in [1531, 822, 3007, 6875, 3934, 838, 88, 445, 519, 415] {
         let r = run_seed(seed);
         assert!(r.violations.is_empty(), "seed {seed} [{}]: {:?}", r.name, r.violations);
     }
