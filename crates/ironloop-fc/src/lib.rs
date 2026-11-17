@@ -218,6 +218,40 @@ struct Rc {
     mode: FlightMode,
 }
 
+/// What the firmware knows about the current flight. Arming starts a new
+/// one, so nothing from an earlier flight carries over.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+struct Flight {
+    /// Leaky integral of vertical acceleration (m/s, down positive). It
+    /// forgets steady motion over a few seconds, but shows climbs and
+    /// descents as they start and end.
+    vz_est: f32,
+    airmode_active: bool,
+    integral: Vec3,
+    mixer_saturated: bool,
+    /// Low-passed setpoint; the setpoint minus this is how fast the pilot
+    /// is moving the sticks (I-term relax).
+    setpoint_lpf: Lpf,
+    setpoint: Vec3,
+    last_pid: Vec3,
+    throttle_demand: f32,
+    runaway_since_us: Option<u64>,
+    runaway_ok_us: u64,
+    /// Since arming, the climb estimate has shown the quad rising while
+    /// upright: it left the ground under its own thrust.
+    lifted_off: bool,
+    lying_since_us: Option<u64>,
+    /// Time spent blocked (see `runaway_and_crash`), and when it last was.
+    blocked_us: u64,
+    blocked_last_us: u64,
+    last_impact_us: Option<u64>,
+    /// Fastest fall (m/s, from `vz_est`) since the frame last tipped past
+    /// 60 degrees.
+    tipped_fall: f32,
+    motor_fault_since_us: [Option<u64>; 4],
+    motor_faults: [bool; 4],
+}
+
 /// The complete firmware state. Everything the firmware knows lives here.
 #[derive(Clone, Debug, PartialEq)]
 pub struct State {
@@ -242,9 +276,6 @@ pub struct State {
     /// Mean IMU sample period (s), where the notches are placed.
     imu_period: f32,
     dterm_lpf: Lpf,
-    /// Low-passed setpoint; the setpoint minus this is how fast the pilot
-    /// is moving the sticks (I-term relax).
-    setpoint_lpf: Lpf,
     accel_lpf: Lpf,
     /// Heavily filtered gyro: body motion without prop vibration.
     gyro_slow: Lpf,
@@ -270,10 +301,6 @@ pub struct State {
     /// Throttle that holds altitude, learned while flying, as it would be
     /// with the pack at the reference voltage (see `sag_ratio`).
     hover_throttle: f32,
-    /// Leaky integral of vertical acceleration (m/s, down positive). It
-    /// forgets steady motion over a few seconds, but shows climbs and
-    /// descents as they start and end.
-    vz_est: f32,
     /// Failsafe landing: throttle taken off (fraction of hover) because the
     /// quad is neither sinking nor speeding up. Large and still not
     /// accelerating means on the ground.
@@ -289,40 +316,20 @@ pub struct State {
     hold_vz_mark: Option<f32>,
 
     armed: bool,
-    airmode_active: bool,
-    integral: Vec3,
-    mixer_saturated: bool,
-    setpoint: Vec3,
-    last_pid: Vec3,
     throttle_out: f32,
-    throttle_demand: f32,
     motors: [u16; 4],
     motor_frac: [f32; 4],
 
+    flight: Flight,
     runaway_active: bool,
     /// The build has flown properly since power-up (runaway detection
     /// switched itself off once), so motor order and direction are right.
     flight_proven: bool,
-    runaway_since_us: Option<u64>,
-    runaway_ok_us: u64,
-    /// Since arming, the climb estimate has shown the quad rising while
-    /// upright: it left the ground under its own thrust.
-    lifted_off: bool,
-    lying_since_us: Option<u64>,
-    /// Time spent blocked (see `runaway_and_crash`), and when it last was.
-    blocked_us: u64,
-    blocked_last_us: u64,
-    last_impact_us: Option<u64>,
-    /// Fastest fall (m/s, from `vz_est`) since the frame last tipped past
-    /// 60 degrees.
-    tipped_fall: f32,
     boot_gesture_since_us: Option<u64>,
 
     battery_volts: Option<f32>,
     battery_level: BatteryLevel,
 
-    motor_fault_since_us: [Option<u64>; 4],
-    motor_faults: [bool; 4],
 
     led: bool,
     beeper: bool,
@@ -346,7 +353,6 @@ impl State {
             rpm_at_us: [None; 4],
             imu_period: 0.0,
             dterm_lpf: Lpf::default(),
-            setpoint_lpf: Lpf::default(),
             accel_lpf: Lpf::default(),
             gyro_slow: Lpf::default(),
             prev_gyro: Vec3::ZERO,
@@ -373,37 +379,21 @@ impl State {
             failsafe_since_us: 0,
             throttle_at_loss: 0.0,
             hover_throttle: cfg.hover_throttle_guess,
-            vz_est: 0.0,
             landing_trim: 0.0,
             landing_vz_ref: (0, 0.0),
             landing_accel: f32::MAX,
             landing_trim_vz: 0.0,
             hold_vz_mark: None,
             armed: false,
-            airmode_active: false,
-            integral: Vec3::ZERO,
-            mixer_saturated: false,
-            setpoint: Vec3::ZERO,
-            last_pid: Vec3::ZERO,
             throttle_out: 0.0,
-            throttle_demand: 0.0,
             motors: [DSHOT_STOP; 4],
             motor_frac: [0.0; 4],
+            flight: Flight::default(),
             runaway_active: false,
             flight_proven: false,
-            runaway_since_us: None,
-            runaway_ok_us: 0,
-            lifted_off: false,
-            lying_since_us: None,
-            blocked_us: 0,
-            blocked_last_us: 0,
-            last_impact_us: None,
-            tipped_fall: 0.0,
             boot_gesture_since_us: None,
             battery_volts: None,
             battery_level: BatteryLevel::Ok,
-            motor_fault_since_us: [None; 4],
-            motor_faults: [false; 4],
             led: false,
             beeper: false,
             effects_dropped: 0,
@@ -422,16 +412,16 @@ impl State {
             calibrated: self.cal.done,
             attitude: self.attitude,
             gyro: self.gyro_lpf.y,
-            rate_setpoint: self.setpoint,
+            rate_setpoint: self.flight.setpoint,
             throttle: self.throttle_out,
-            throttle_demand: if self.armed { self.throttle_demand } else { 0.0 },
+            throttle_demand: if self.armed { self.flight.throttle_demand } else { 0.0 },
             battery_volts: self.battery_volts,
             battery_level: self.battery_level,
             motors: self.motors,
-            motor_faults: self.motor_faults,
-            airmode_active: self.airmode_active,
+            motor_faults: self.flight.motor_faults,
+            airmode_active: self.flight.airmode_active,
             blockers: self.arm_blockers(),
-            climb_rate: -self.vz_est,
+            climb_rate: -self.flight.vz_est,
             hover_throttle: self.hover_throttle,
             now_us: self.now_us,
             effects_dropped: self.effects_dropped,
@@ -578,8 +568,8 @@ fn disarm(s: &mut State, reason: DisarmReason, fx: &mut Out) {
         return;
     }
     s.armed = false;
-    s.airmode_active = false;
-    s.integral = Vec3::ZERO;
+    s.flight.airmode_active = false;
+    s.flight.integral = Vec3::ZERO;
     s.failsafe = FailsafeStage::None;
     s.motors = [DSHOT_STOP; 4];
     s.motor_frac = [0.0; 4];
@@ -636,22 +626,12 @@ fn on_rc(s: &mut State, channels: &[u16; RC_CHANNELS], fx: &mut Out) {
         let blockers = s.arm_blockers();
         if blockers.is_empty() {
             s.armed = true;
-            s.airmode_active = false;
-            s.vz_est = 0.0;
-            s.integral = Vec3::ZERO;
+            s.flight = Flight::default();
             // Runaway detection catches a build that cannot fly. Once this
             // power-up has shown it flies, a re-arm (even mid-air, to save a
             // fall) must not mistake the fight back from a crash for one;
             // crash detection handles that.
             s.runaway_active = !s.flight_proven;
-            s.runaway_since_us = None;
-            s.runaway_ok_us = 0;
-            s.lifted_off = false;
-            s.lying_since_us = None;
-            s.blocked_us = 0;
-            s.last_impact_us = None;
-            s.motor_faults = [false; 4];
-            s.motor_fault_since_us = [None; 4];
             // Spin up to idle now. Until the next IMU sample runs the
             // controller, the keep-alive tick repeats this command; left at
             // the disarmed zeros it would hold the motors stopped while armed.

@@ -60,15 +60,15 @@ pub(crate) fn control(s: &mut State, gyro: Vec3, accel: Vec3, dt: f32, reset: bo
     // sinking; starting from zero would read that error for the whole
     // landing) and integrates without leaking.
     let down_accel = s.attitude.rotate(accel).z + s.cal.accel_1g;
-    let leak = if s.failsafe == FailsafeStage::None { s.vz_est / 4.0 } else { 0.0 };
-    s.vz_est += (down_accel - leak) * dt;
+    let leak = if s.failsafe == FailsafeStage::None { s.flight.vz_est / 4.0 } else { 0.0 };
+    s.flight.vz_est += (down_accel - leak) * dt;
     let (roll, pitch, yaw, throttle) = match failsafe::throttle(s, dt) {
         None => (s.rc.roll, s.rc.pitch, s.rc.yaw, s.rc.throttle),
         Some(throttle) => (0.0, 0.0, 0.0, throttle),
     };
-    s.throttle_demand = throttle;
+    s.flight.throttle_demand = throttle;
     if throttle > cfg.airmode_throttle {
-        s.airmode_active = true;
+        s.flight.airmode_active = true;
     }
     // Over a second or two of level flight the pilot's average throttle is
     // the one that holds altitude. Thrust grows with throttle squared and
@@ -77,11 +77,11 @@ pub(crate) fn control(s: &mut State, gyro: Vec3, accel: Vec3, dt: f32, reset: bo
     // then climb instead of land), so learning pauses while moving up or
     // down.
     let tilt = s.attitude.tilt();
-    let level_flight = s.vz_est.abs() < 0.5;
+    let level_flight = s.flight.vz_est.abs() < 0.5;
     // In reference-voltage terms, so the failsafe flies the same hover on a
     // sagging pack.
     let at_ref = sag_ratio(s);
-    if s.failsafe == FailsafeStage::None && s.airmode_active && level_flight && tilt < 0.5 && (0.1..0.95).contains(&throttle) {
+    if s.failsafe == FailsafeStage::None && s.flight.airmode_active && level_flight && tilt < 0.5 && (0.1..0.95).contains(&throttle) {
         let level = throttle * at_ref * libm::sqrtf(libm::cosf(tilt));
         s.hover_throttle += (level - s.hover_throttle) * (dt / 1.5);
     }
@@ -115,22 +115,22 @@ pub(crate) fn control(s: &mut State, gyro: Vec3, accel: Vec3, dt: f32, reset: bo
     // No I-term at zero throttle: resting on the ground (or a wall) the
     // frame cannot move, the error never closes, and an integrator would
     // wind up and push the motors through airmode.
-    let integrate = s.airmode_active && throttle > THROTTLE_LOW && !s.mixer_saturated && !s.gyro_saturated && !reset;
-    if !s.airmode_active {
+    let integrate = s.flight.airmode_active && throttle > THROTTLE_LOW && !s.flight.mixer_saturated && !s.gyro_saturated && !reset;
+    if !s.flight.airmode_active {
         // On the ground before takeoff: no I-term windup.
-        s.integral = Vec3::ZERO;
+        s.flight.integral = Vec3::ZERO;
     }
     // I-term relax (as in Betaflight): while the roll or pitch setpoint is
     // moving fast the error is the frame catching up, not a steady offset;
     // integrating it overshoots the stick by half again and then unwinds
     // for a couple of hundred ms.
-    let sp_moving = setpoint - s.setpoint_lpf.update(setpoint, 15.0, dt);
+    let sp_moving = setpoint - s.flight.setpoint_lpf.update(setpoint, 15.0, dt);
     let relax = |x: f32| (1.0 - x.abs() / 40f32.to_radians()).clamp(0.0, 1.0);
     let relax = [relax(sp_moving.x), relax(sp_moving.y), 1.0];
     let e = err.to_array();
     let d = d_gyro.to_array();
     let sp = setpoint.to_array();
-    let mut integral = s.integral.to_array();
+    let mut integral = s.flight.integral.to_array();
     let mut out = [0.0f32; 3];
     for i in 0..3 {
         let k = cfg.pid[i];
@@ -141,9 +141,9 @@ pub(crate) fn control(s: &mut State, gyro: Vec3, accel: Vec3, dt: f32, reset: bo
         let lim = if i == 2 { cfg.pid_sum_limit * 0.7 } else { cfg.pid_sum_limit };
         out[i] = (k.p * e[i] + integral[i] - k.d * d[i] + k.ff * sp[i]).clamp(-lim, lim);
     }
-    s.integral = Vec3::from_array(integral);
-    s.setpoint = setpoint;
-    s.last_pid = Vec3::from_array(out);
+    s.flight.integral = Vec3::from_array(integral);
+    s.flight.setpoint = setpoint;
+    s.flight.last_pid = Vec3::from_array(out);
 
     let mut mix = [0.0f32; 4];
     for (m, row) in mix.iter_mut().zip(MIX) {
@@ -152,7 +152,7 @@ pub(crate) fn control(s: &mut State, gyro: Vec3, accel: Vec3, dt: f32, reset: bo
     let lo = mix.iter().copied().fold(f32::MAX, f32::min);
     let hi = mix.iter().copied().fold(f32::MIN, f32::max);
     let span = hi - lo;
-    s.mixer_saturated = span > 1.0;
+    s.flight.mixer_saturated = span > 1.0;
     if span > 1.0 {
         for m in &mut mix {
             *m /= span;
@@ -165,7 +165,7 @@ pub(crate) fn control(s: &mut State, gyro: Vec3, accel: Vec3, dt: f32, reset: bo
         _ => 1.0,
     };
     thr = (thr * comp).min(1.0);
-    if s.airmode_active {
+    if s.flight.airmode_active {
         // Airmode: shift throttle so every motor stays in range and the
         // attitude correction is never clipped.
         thr = thr.clamp(-lo, (1.0 - hi).max(-lo));

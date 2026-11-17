@@ -8,7 +8,7 @@ use crate::{DisarmReason, Effect, FailsafeStage, GRAVITY, Notice, Out, State, TH
 /// `None` while the pilot flies. Runs on every control step.
 pub(crate) fn throttle(s: &mut State, dt: f32) -> Option<f32> {
     if s.failsafe == FailsafeStage::Hold && s.hold_vz_mark.is_none() && s.now_us.saturating_sub(s.failsafe_since_us) >= 500_000 {
-        s.hold_vz_mark = Some(s.vz_est);
+        s.hold_vz_mark = Some(s.flight.vz_est);
     }
     match s.failsafe {
         FailsafeStage::None => None,
@@ -29,8 +29,8 @@ pub(crate) fn throttle(s: &mut State, dt: f32) -> Option<f32> {
             let landing_s = s.now_us.saturating_sub(s.failsafe_since_us) as f32 * 1e-6;
             let ceiling = (1.15 - 0.04 * landing_s).max(1.0);
             if s.now_us.saturating_sub(s.landing_vz_ref.0) >= 250_000 {
-                s.landing_accel = (s.vz_est - s.landing_vz_ref.1) / 0.25;
-                s.landing_vz_ref = (s.now_us, s.vz_est);
+                s.landing_accel = (s.flight.vz_est - s.landing_vz_ref.1) / 0.25;
+                s.landing_vz_ref = (s.now_us, s.flight.vz_est);
             }
             // Not sinking, or not speeding up although throttle is being
             // taken off: take more off, steadily. In the air that soon
@@ -39,14 +39,14 @@ pub(crate) fn throttle(s: &mut State, dt: f32) -> Option<f32> {
             // on the ground nothing changes, and once thrust is well below
             // hover `advance` calls it landed.
             if s.landing_trim == 0.0 {
-                s.landing_trim_vz = s.vz_est;
+                s.landing_trim_vz = s.flight.vz_est;
             }
-            s.landing_trim = if s.vz_est < 0.25 || unmoved(s) {
+            s.landing_trim = if s.flight.vz_est < 0.25 || unmoved(s) {
                 (s.landing_trim + 0.25 * dt).min(0.35)
             } else {
                 (s.landing_trim - 2.0 * dt).max(0.0)
             };
-            let brake = 0.15 * (s.vz_est - 1.2).max(0.0);
+            let brake = 0.15 * (s.flight.vz_est - 1.2).max(0.0);
             // A descent still speeding up gets up to 8% over the ceiling.
             // This brakes on acceleration over a quarter second, which the
             // estimate's slow drift cannot fake, so it cannot hold the quad
@@ -64,7 +64,7 @@ pub(crate) fn throttle(s: &mut State, dt: f32) -> Option<f32> {
 /// started. The speed estimate itself drifts by a m/s or more over a long
 /// landing, so this uses only how it changes.
 fn unmoved(s: &State) -> bool {
-    s.landing_accel.abs() < 0.6 && s.vz_est - s.landing_trim_vz < 0.5
+    s.landing_accel.abs() < 0.6 && s.flight.vz_est - s.landing_trim_vz < 0.5
 }
 
 /// Stage changes, run after every event.
@@ -91,7 +91,7 @@ pub(crate) fn advance(s: &mut State, fx: &mut Out) {
             }
         }
         FailsafeStage::Hold if now - s.failsafe_since_us >= cfg.failsafe_stage1_us => {
-            if !s.airmode_active || s.throttle_at_loss < THROTTLE_LOW {
+            if !s.flight.airmode_active || s.throttle_at_loss < THROTTLE_LOW {
                 // Still on the ground: just stop.
                 disarm(s, DisarmReason::Failsafe, fx);
             } else {
@@ -100,7 +100,7 @@ pub(crate) fn advance(s: &mut State, fx: &mut Out) {
                 // high, so throttle is about a/2g too high.
                 if let Some(mark) = s.hold_vz_mark {
                     let span = now.saturating_sub(s.failsafe_since_us + 500_000).max(100_000) as f32 * 1e-6;
-                    let down_accel = (s.vz_est - mark) / span;
+                    let down_accel = (s.flight.vz_est - mark) / span;
                     s.hover_throttle *= (1.0 + down_accel / (2.0 * GRAVITY)).clamp(0.85, 1.15);
                 }
                 s.failsafe = FailsafeStage::Landing;
@@ -108,7 +108,7 @@ pub(crate) fn advance(s: &mut State, fx: &mut Out) {
                 // Keep the vertical speed the hold measured: the quad may
                 // already be sinking.
                 s.landing_trim = 0.0;
-                s.landing_vz_ref = (now, s.vz_est);
+                s.landing_vz_ref = (now, s.flight.vz_est);
                 s.landing_accel = f32::MAX;
                 fx.push(Effect::Notice(Notice::Failsafe(FailsafeStage::Landing)));
             }

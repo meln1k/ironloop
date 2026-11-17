@@ -43,15 +43,15 @@ pub(crate) fn check_motors(s: &mut State, erpm: &[Option<u32>; 4], fx: &mut Out)
         let expected = s.motor_frac[i] * s.cfg.motor_max_erpm * vcomp;
         let low = s.motor_frac[i] > 0.25 && (rpm as f32) < expected * s.cfg.motor_fault_frac;
         if low {
-            let since = *s.motor_fault_since_us[i].get_or_insert(s.now_us);
-            if !s.motor_faults[i] && s.now_us - since >= s.cfg.motor_fault_us {
-                s.motor_faults[i] = true;
+            let since = *s.flight.motor_fault_since_us[i].get_or_insert(s.now_us);
+            if !s.flight.motor_faults[i] && s.now_us - since >= s.cfg.motor_fault_us {
+                s.flight.motor_faults[i] = true;
                 fx.push(Effect::Notice(Notice::MotorFault(i as u8)));
             }
         } else if (rpm as f32) >= expected * 0.6 || s.motor_frac[i] <= 0.25 {
-            s.motor_fault_since_us[i] = None;
-            if s.motor_faults[i] {
-                s.motor_faults[i] = false;
+            s.flight.motor_fault_since_us[i] = None;
+            if s.flight.motor_faults[i] {
+                s.flight.motor_faults[i] = false;
                 fx.push(Effect::Notice(Notice::MotorRecovered(i as u8)));
             }
         }

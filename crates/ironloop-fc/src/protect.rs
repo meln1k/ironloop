@@ -24,7 +24,7 @@ pub(crate) fn runaway_and_crash(s: &mut State, gyro: Vec3, accel: Vec3, throttle
     let now = s.now_us;
     if s.runaway_active {
         let lim = cfg.pid_sum_limit * cfg.runaway_pid_frac;
-        let pid_high = s.last_pid.x.abs() >= lim || s.last_pid.y.abs() >= lim;
+        let pid_high = s.flight.last_pid.x.abs() >= lim || s.flight.last_pid.y.abs() >= lim;
         let spinning = gyro.norm() > cfg.runaway_gyro;
         // A pilot's stick reversal saturates the PIDs while the frame still
         // turns the old way, but it slows down in the direction pushed. A
@@ -32,10 +32,10 @@ pub(crate) fn runaway_and_crash(s: &mut State, gyro: Vec3, accel: Vec3, throttle
         // sticks moved, only that counts; with them centred, any saturated
         // spin does (a tumble on the ground need not speed up).
         let flown = s.rc.roll.abs().max(s.rc.pitch.abs()).max(s.rc.yaw.abs()) > 0.15;
-        let p = s.last_pid;
+        let p = s.flight.last_pid;
         let pushed_back = s.ang_accel.x * p.x + s.ang_accel.y * p.y < 0.0;
         let runaway = pid_high && spinning && (pushed_back || !flown);
-        let runaway_for = held_for(&mut s.runaway_since_us, runaway, now);
+        let runaway_for = held_for(&mut s.flight.runaway_since_us, runaway, now);
         if runaway && runaway_for >= cfg.runaway_us {
             disarm(s, DisarmReason::RunawayTakeoff, fx);
             return;
@@ -51,12 +51,12 @@ pub(crate) fn runaway_and_crash(s: &mut State, gyro: Vec3, accel: Vec3, throttle
             // quad has lifted off: climbed upright, which the ground cannot
             // fake.
             let upright = s.attitude.tilt() < 30f32.to_radians();
-            if upright && -s.vz_est > LIFTOFF_CLIMB {
-                s.lifted_off = true;
+            if upright && -s.flight.vz_est > LIFTOFF_CLIMB {
+                s.flight.lifted_off = true;
             }
-            if throttle > cfg.airmode_throttle && s.lifted_off && upright && !pid_high && (!spinning || flown) {
-                s.runaway_ok_us += (dt * 1e6) as u64;
-                if s.runaway_ok_us >= cfg.runaway_deactivate_us {
+            if throttle > cfg.airmode_throttle && s.flight.lifted_off && upright && !pid_high && (!spinning || flown) {
+                s.flight.runaway_ok_us += (dt * 1e6) as u64;
+                if s.flight.runaway_ok_us >= cfg.runaway_deactivate_us {
                     s.runaway_active = false;
                     s.flight_proven = true;
                 }
@@ -99,7 +99,7 @@ pub(crate) fn runaway_and_crash(s: &mut State, gyro: Vec3, accel: Vec3, throttle
     let across = Vec3::new(accel.x, accel.y, accel.z.max(0.0)).norm();
     let jolt = across > (tw + 1.0) * GRAVITY * margin || along_thrust > (2.0 * tw + 1.0) * GRAVITY * margin;
     if a > cfg.crash_impact && jolt {
-        s.last_impact_us = Some(now);
+        s.flight.last_impact_us = Some(now);
     }
     let propped = (0.7 * GRAVITY..1.3 * GRAVITY).contains(&a) && -accel.z / a < 0.64;
     // Spinning flat on the ground with the thrust and friction pulling
@@ -109,30 +109,30 @@ pub(crate) fn runaway_and_crash(s: &mut State, gyro: Vec3, accel: Vec3, throttle
     // Blocked means not turning the way the sticks ask, whatever else it
     // does: a corkscrew dive rolls about the vertical, like a quad spinning
     // flat, but it follows the stick.
-    let demand = Vec3::new(s.setpoint.x, s.setpoint.y, 0.0);
+    let demand = Vec3::new(s.flight.setpoint.x, s.flight.setpoint.y, 0.0);
     let wants = demand.norm();
     let blocked = tilt > TIPPED_OVER && wants > 2.0 && slow.dot(demand) < wants;
     // Each condition times itself: a pilot rolling out of a slow inverted
     // dive turns `lying` into `blocked` for a moment, and must get the full
     // blocked time for the frame to follow.
-    let lying_for = held_for(&mut s.lying_since_us, lying, now);
+    let lying_for = held_for(&mut s.flight.lying_since_us, lying, now);
     // Blocked adds up: a pilot slamming the sticks from side to side rocks
     // a stuck frame towards each new demand for a moment, which is not
     // getting free. Only righting itself or half a second unblocked is.
     if blocked {
-        s.blocked_us += (dt * 1e6) as u64;
-        s.blocked_last_us = now;
-    } else if tilt <= TIPPED_OVER || now.saturating_sub(s.blocked_last_us) >= CRASH_BLOCKED_GAP_US {
-        s.blocked_us = 0;
+        s.flight.blocked_us += (dt * 1e6) as u64;
+        s.flight.blocked_last_us = now;
+    } else if tilt <= TIPPED_OVER || now.saturating_sub(s.flight.blocked_last_us) >= CRASH_BLOCKED_GAP_US {
+        s.flight.blocked_us = 0;
     }
-    let blocked_for = if blocked { s.blocked_us } else { 0 };
+    let blocked_for = if blocked { s.flight.blocked_us } else { 0 };
     // Or it rolled over on the ground: an inverted plunge only reads like
     // lying once drag holds it up, so it must have fallen several m/s
     // first, which the vertical-speed estimate sees. Tipping over where it
     // stood needs no jolt (a pilot flipping a quad that cannot take off).
-    s.tipped_fall = if tilt > TIPPED_OVER { s.tipped_fall.max(s.vz_est) } else { 0.0 };
-    let rolled_over = s.tipped_fall < TIPPED_FALL_MAX;
-    let hit = s.lying_since_us.is_some_and(|l| rolled_over || s.last_impact_us.is_some_and(|t| t + cfg.crash_impact_window_us >= l));
+    s.flight.tipped_fall = if tilt > TIPPED_OVER { s.flight.tipped_fall.max(s.flight.vz_est) } else { 0.0 };
+    let rolled_over = s.flight.tipped_fall < TIPPED_FALL_MAX;
+    let hit = s.flight.lying_since_us.is_some_and(|l| rolled_over || s.flight.last_impact_us.is_some_and(|t| t + cfg.crash_impact_window_us >= l));
     if (hit && lying_for >= cfg.crash_still_us) || blocked_for >= cfg.crash_blocked_us {
         disarm(s, DisarmReason::Crash, fx);
     }
