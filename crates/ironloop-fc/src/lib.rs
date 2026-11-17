@@ -350,6 +350,9 @@ pub struct State {
     blocked_us: u64,
     blocked_last_us: u64,
     last_impact_us: Option<u64>,
+    /// Fastest fall (m/s, from `vz_est`) since the frame last tipped past
+    /// 60 degrees.
+    tipped_fall: f32,
     boot_gesture_since_us: Option<u64>,
 
     battery_volts: Option<f32>,
@@ -440,6 +443,7 @@ impl State {
             blocked_us: 0,
             blocked_last_us: 0,
             last_impact_us: None,
+            tipped_fall: 0.0,
             boot_gesture_since_us: None,
             battery_volts: None,
             battery_level: BatteryLevel::Ok,
@@ -976,6 +980,10 @@ fn control(s: &mut State, gyro: Vec3, accel: Vec3, dt: f32, reset: bool, fx: &mu
 /// over (µs).
 const CRASH_BLOCKED_GAP_US: u64 = 500_000;
 
+/// A frame that tipped over without the vertical-speed estimate showing a
+/// fall faster than this (m/s) rolled over on the ground.
+const TIPPED_FALL_MAX: f32 = 2.0;
+
 fn runaway_and_crash(s: &mut State, gyro: Vec3, accel: Vec3, throttle: f32, dt: f32, fx: &mut Out) {
     let cfg = s.cfg;
     let now = s.now_us;
@@ -1078,7 +1086,13 @@ fn runaway_and_crash(s: &mut State, gyro: Vec3, accel: Vec3, throttle: f32, dt: 
         s.blocked_us = 0;
     }
     let blocked_for = if blocked { s.blocked_us } else { 0 };
-    let hit = s.lying_since_us.is_some_and(|l| s.last_impact_us.is_some_and(|t| t + cfg.crash_impact_window_us >= l));
+    // Or it rolled over on the ground: an inverted plunge only reads like
+    // lying once drag holds it up, so it must have fallen several m/s
+    // first, which the vertical-speed estimate sees. Tipping over where it
+    // stood needs no jolt (a pilot flipping a quad that cannot take off).
+    s.tipped_fall = if tilt > 60f32.to_radians() { s.tipped_fall.max(s.vz_est) } else { 0.0 };
+    let rolled_over = s.tipped_fall < TIPPED_FALL_MAX;
+    let hit = s.lying_since_us.is_some_and(|l| rolled_over || s.last_impact_us.is_some_and(|t| t + cfg.crash_impact_window_us >= l));
     if (hit && lying_for >= cfg.crash_still_us) || blocked_for >= cfg.crash_blocked_us {
         disarm(s, DisarmReason::Crash, fx);
     }

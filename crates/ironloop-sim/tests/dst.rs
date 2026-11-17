@@ -30,9 +30,11 @@ fn generated_scenarios_hold_every_property_and_replay_identically() {
 /// and reset the blocked-crash timer at every stick reversal.
 /// Seed 88 crashes onto its nose and spins flat with the roll stick held,
 /// which the attitude estimate's error once made look like rolling.
+/// Seed 445 loses a motor, sits on the ground, and is flipped over where it
+/// stands by the pilot with no impact, which once never counted as lying.
 #[test]
 fn regression_seeds_hold_every_property() {
-    for seed in [1531, 822, 3007, 6875, 3934, 838, 88] {
+    for seed in [1531, 822, 3007, 6875, 3934, 838, 88, 445] {
         let r = run_seed(seed);
         assert!(r.violations.is_empty(), "seed {seed} [{}]: {:?}", r.name, r.violations);
     }
