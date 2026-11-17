@@ -96,7 +96,7 @@ MUTANTS = {
     "crash impact counts drag braking after a power dive": [(LIB, "if a > cfg.crash_impact && jolt {", "if a > cfg.crash_impact {")],
     "runaway fires on gyro alone": [(LIB, "if pid_high && spinning && (pushed_back || !flown) {", "if spinning {")],
     "runaway detection ends after 0.5 s of throttle alone": [
-        (LIB, "if throttle > cfg.airmode_throttle && upright && !pid_high && (!spinning || flown) {", "if throttle > cfg.airmode_throttle {"),
+        (LIB, "if throttle > cfg.airmode_throttle && s.lifted_off && upright && !pid_high && (!spinning || flown) {", "if throttle > cfg.airmode_throttle {"),
         (CFG, "runaway_deactivate_us: 1_000_000,", "runaway_deactivate_us: 500_000,"),
     ],
     # Time.

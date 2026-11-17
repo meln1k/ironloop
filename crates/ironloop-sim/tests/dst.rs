@@ -161,6 +161,40 @@ fn a_snapshot_resumes_identically() {
     }
 }
 
+/// A build with its motor wires swapped sits upright on the ground at part
+/// throttle before the pilot throttles up. Sitting still, upright, with the
+/// PIDs in range once counted as proof that the build flies and switched
+/// runaway detection off, leaving crash detection to stop it seconds later.
+#[test]
+fn sitting_at_part_throttle_does_not_prove_a_build_flies() {
+    use ironloop_sim::{Sim, Sticks};
+    for thr in [0.3, 0.4] {
+        for sit in [0.7, 1.2, 2.0] {
+            let mut sc = Scenario::manual(0);
+            sc.motors_swapped = true;
+            let mut sim = Sim::new(sc);
+            let mut armed_at = None;
+            while sim.t_us < 12_000_000 {
+                let t = sim.t_us as f64 * 1e-6;
+                let mut s = Sticks { arm: t > 1.5, ..Default::default() };
+                if let Some(a) = armed_at {
+                    s.throttle = if t - a < sit { thr } else { 0.7 };
+                }
+                sim.manual = Some(s);
+                sim.next_event();
+                if sim.status.armed && armed_at.is_none() {
+                    armed_at = Some(t + 0.2);
+                }
+                if armed_at.is_some() && !sim.status.armed {
+                    break;
+                }
+            }
+            assert!(!sim.status.armed, "still armed after sitting {sit} s at {thr}");
+            assert!(sim.monitor.violations.is_empty(), "sit {sit} s at {thr}: {:?} {:?}", sim.monitor.violations, sim.notices.last());
+        }
+    }
+}
+
 /// Acro freestyle on a powerful build (twice the Mobula6's thrust): climb,
 /// roll inverted, power-dive, cut the throttle and fall inverted hands off,
 /// then roll back and catch it. Cutting the throttle at the bottom of the

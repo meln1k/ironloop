@@ -345,6 +345,9 @@ pub struct State {
     flight_proven: bool,
     runaway_since_us: Option<u64>,
     runaway_ok_us: u64,
+    /// Since arming, the climb estimate has shown the quad rising while
+    /// upright: it left the ground under its own thrust.
+    lifted_off: bool,
     lying_since_us: Option<u64>,
     /// Time spent blocked (see `runaway_and_crash`), and when it last was.
     blocked_us: u64,
@@ -439,6 +442,7 @@ impl State {
             flight_proven: false,
             runaway_since_us: None,
             runaway_ok_us: 0,
+            lifted_off: false,
             lying_since_us: None,
             blocked_us: 0,
             blocked_last_us: 0,
@@ -989,6 +993,9 @@ const CRASH_BLOCKED_GAP_US: u64 = 500_000;
 /// fall faster than this (m/s) rolled over on the ground.
 const TIPPED_FALL_MAX: f32 = 2.0;
 
+/// Climb (m/s, from `vz_est`) that shows an upright quad left the ground.
+const LIFTOFF_CLIMB: f32 = 0.5;
+
 fn runaway_and_crash(s: &mut State, gyro: Vec3, accel: Vec3, throttle: f32, dt: f32, fx: &mut Out) {
     let cfg = s.cfg;
     let now = s.now_us;
@@ -1017,9 +1024,15 @@ fn runaway_and_crash(s: &mut State, gyro: Vec3, accel: Vec3, throttle: f32, dt: 
             // as long as it stays the right way up with the PIDs in range.
             // Throttle alone does not: a quad that cannot fly may sit on
             // the ground at part throttle until a gust tips it, and then
-            // tumble about on it while the pilot works the sticks.
+            // tumble about on it while the pilot works the sticks. Sitting
+            // still and upright is calm too, so none of it counts until the
+            // quad has lifted off: climbed upright, which the ground cannot
+            // fake.
             let upright = s.attitude.tilt() < 30f32.to_radians();
-            if throttle > cfg.airmode_throttle && upright && !pid_high && (!spinning || flown) {
+            if upright && -s.vz_est > LIFTOFF_CLIMB {
+                s.lifted_off = true;
+            }
+            if throttle > cfg.airmode_throttle && s.lifted_off && upright && !pid_high && (!spinning || flown) {
                 s.runaway_ok_us += (dt * 1e6) as u64;
                 if s.runaway_ok_us >= cfg.runaway_deactivate_us {
                     s.runaway_active = false;
@@ -1172,6 +1185,7 @@ fn on_rc(s: &mut State, channels: &[u16; RC_CHANNELS], fx: &mut Out) {
             s.runaway_active = !s.flight_proven;
             s.runaway_since_us = None;
             s.runaway_ok_us = 0;
+            s.lifted_off = false;
             s.lying_since_us = None;
             s.blocked_us = 0;
             s.last_impact_us = None;
