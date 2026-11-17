@@ -281,7 +281,6 @@ pub struct State {
     /// in a row have been rejected since.
     last_accepted_gyro: Option<Vec3>,
     spike_run: u8,
-    imu_failed: bool,
     gyro_lpf: Pt1v,
     rpm_filter: rpm::RpmFilter,
     /// When each motor's eRPM last arrived; the RPM filter drops a motor
@@ -399,7 +398,6 @@ impl State {
             last_raw: ([f32::NAN; 3], [f32::NAN; 3]),
             last_accepted_gyro: None,
             spike_run: 0,
-            imu_failed: false,
             gyro_lpf: Pt1v::default(),
             rpm_filter: rpm::RpmFilter::default(),
             rpm_at_us: [None; 4],
@@ -526,7 +524,7 @@ impl State {
         if self.rc_lost() {
             b |= ArmBlockers::RC_LINK;
         }
-        if self.imu_failed || self.imu_stale() {
+        if self.imu_stale() {
             b |= ArmBlockers::IMU;
         }
         if self.attitude.tilt() > self.cfg.max_arm_tilt {
@@ -665,10 +663,6 @@ fn on_imu(s: &mut State, gyro: [f32; 3], accel: [f32; 3], fx: &mut Out) {
         s.last_good_imu_us = Some(now);
     }
     s.last_raw = (gyro, accel);
-    if s.imu_failed && !s.armed {
-        // Data is back; the estimator restarts from the accelerometer.
-        s.imu_failed = false;
-    }
 
     let saturated = g_raw.max_abs() >= s.cfg.gyro_range * 0.97;
     if saturated && !s.gyro_saturated {
@@ -720,7 +714,7 @@ fn on_imu(s: &mut State, gyro: [f32; 3], accel: [f32; 3], fx: &mut Out) {
         s.accel_lpf.update(a, 30.0, dt)
     };
 
-    estimate_attitude(s, g, accel_f, dt, reset_dynamics);
+    estimate_attitude(s, g, accel_f, dt);
     if s.armed {
         control(s, gyro_f, accel_f, dt, reset_dynamics, fx);
     } else {
@@ -760,12 +754,9 @@ const GROUND_RESET_QUIET_US: u64 = 250_000;
 const GROUND_RESET_US: u64 = 500_000;
 
 /// Mahony complementary filter.
-fn estimate_attitude(s: &mut State, gyro: Vec3, accel: Vec3, dt: f32, reset: bool) {
+fn estimate_attitude(s: &mut State, gyro: Vec3, accel: Vec3, dt: f32) {
     let a_norm = accel.norm();
     let up_meas = accel * (1.0 / a_norm.max(1e-6));
-    if reset && s.imu_failed {
-        s.attitude = Quat::IDENTITY;
-    }
     // Specific force is only a gravity reference when the quad is not
     // accelerating; trust it less the further it is from 1 g.
     let dev = (a_norm / GRAVITY - 1.0).abs();
@@ -1340,7 +1331,6 @@ fn housekeeping(s: &mut State, fx: &mut Out) {
     let cfg = s.cfg;
 
     if s.armed && s.imu_stale() {
-        s.imu_failed = true;
         disarm(s, DisarmReason::ImuFailure, fx);
     }
 
