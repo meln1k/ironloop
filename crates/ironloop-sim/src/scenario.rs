@@ -313,9 +313,11 @@ impl Scenario {
         imu.odr_hz = *r.pick(&[1600.0, 3200.0, 3200.0, 4000.0]);
         imu.jitter_us = r.range_u64(2, 40);
         imu.read_delay_us = r.range_u64(80, 160);
-        // ICM-42688 / BMI270 anti-alias and UI filters: roughly 100-500 Hz,
-        // which delays the gyro by about 0.6-3 ms.
-        imu.chip_lpf_hz = r.range(100.0, 500.0);
+        // The chip's own filters as the board sets them up: the BMI270's
+        // normal mode at 3.2 kHz is about 751 Hz, the ICM-42688's UI filter
+        // at 2 kHz about 500 Hz plus its anti-alias filter. That delays the
+        // gyro by about 0.4-1 ms and leaves most of the prop vibration in.
+        imu.chip_lpf_hz = r.range(300.0, 750.0);
         imu.gyro_noise *= r.range(0.5, 2.5);
         imu.accel_noise *= r.range(0.5, 2.5);
         let bias = r.range(0.0, 8.0f32.to_radians());

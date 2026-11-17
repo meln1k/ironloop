@@ -42,6 +42,17 @@ pub struct Config {
     /// Accelerometer full-scale range in m/s².
     pub accel_range: f32,
     pub gyro_lpf_hz: f32,
+    /// Gyro low-pass cutoff while the RPM filter has fresh eRPM from all
+    /// four motors: the notches take out prop vibration, so the low-pass
+    /// can let more through and lag less.
+    pub gyro_lpf_rpm_hz: f32,
+    /// RPM filter: harmonics notched per motor (0 turns it off), the
+    /// notches' Q, and the lowest frequency notched (Hz).
+    pub rpm_filter_harmonics: u8,
+    pub rpm_filter_q: f32,
+    pub rpm_filter_min_hz: f32,
+    /// Motor magnet pole pairs (eRPM / pole pairs = RPM).
+    pub motor_pole_pairs: f32,
     /// Largest believable change between consecutive gyro samples (rad/s).
     pub gyro_spike: f32,
     pub dterm_lpf_hz: f32,
@@ -136,6 +147,14 @@ impl Default for Config {
             gyro_range: 2000.0f32.to_radians(),
             accel_range: 16.0 * 9.80665,
             gyro_lpf_hz: 150.0,
+            // In the sim, the notches plus 200 Hz leave less motor noise
+            // than 150 Hz alone, and lag the gyro no more.
+            gyro_lpf_rpm_hz: 200.0,
+            rpm_filter_harmonics: 3,
+            rpm_filter_q: 8.0,
+            rpm_filter_min_hz: 100.0,
+            // SE0702: 12 poles.
+            motor_pole_pairs: 6.0,
             gyro_spike: 10.0,
             dterm_lpf_hz: 90.0,
             rates: [
@@ -179,7 +198,7 @@ impl Default for Config {
             crash_blocked_us: 1_500_000,
             motor_fault_frac: 0.3,
             motor_fault_us: 60_000,
-            motor_max_erpm: 72_000.0 * 6.0,
+            motor_max_erpm: 72_000.0 * 6.0, // 72,000 RPM × 6 pole pairs
         }
     }
 }

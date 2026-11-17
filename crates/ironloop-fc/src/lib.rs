@@ -14,6 +14,7 @@
 pub mod config;
 pub mod math;
 pub mod proto;
+pub mod rpm;
 
 pub use config::{AxisPid, Config, ImuAlignment, Rates};
 use heapless::Vec;
@@ -281,6 +282,12 @@ pub struct State {
     spike_run: u8,
     imu_failed: bool,
     gyro_lpf: Pt1v,
+    rpm_filter: rpm::RpmFilter,
+    /// When each motor's eRPM last arrived; the RPM filter drops a motor
+    /// whose telemetry goes stale.
+    rpm_at_us: [Option<u64>; 4],
+    /// Mean IMU sample period (s), where the notches are placed.
+    imu_period: f32,
     dterm_lpf: Pt1v,
     /// Low-passed setpoint; the setpoint minus this is how fast the pilot
     /// is moving the sticks (I-term relax).
@@ -378,6 +385,9 @@ impl State {
             spike_run: 0,
             imu_failed: false,
             gyro_lpf: Pt1v::default(),
+            rpm_filter: rpm::RpmFilter::default(),
+            rpm_at_us: [None; 4],
+            imu_period: 0.0,
             dterm_lpf: Pt1v::default(),
             setpoint_lpf: Pt1v::default(),
             accel_lpf: Pt1v::default(),
@@ -662,10 +672,22 @@ fn on_imu(s: &mut State, gyro: [f32; 3], accel: [f32; 3], fx: &mut Out) {
     }
     let g = g - s.cal.bias;
     let gyro_f = if reset_dynamics {
+        s.rpm_filter.reset(g);
         s.gyro_lpf.reset(g);
         g
     } else {
-        s.gyro_lpf.update(g, s.cfg.gyro_lpf_hz, dt)
+        s.imu_period = if s.imu_period == 0.0 { dt } else { s.imu_period + (dt - s.imu_period) * 0.01 };
+        // A motor whose eRPM stopped coming loses its notches.
+        for i in 0..4 {
+            if s.rpm_at_us[i].is_some_and(|t| now.saturating_sub(t) > RPM_STALE_US) {
+                s.rpm_at_us[i] = None;
+                s.rpm_filter.set_motor(i, None, 0.0, 0, 0.0, 0.0);
+            }
+        }
+        let rpm_on = s.cfg.rpm_filter_harmonics > 0 && s.rpm_at_us.iter().all(Option::is_some);
+        let hz = if rpm_on { s.cfg.gyro_lpf_rpm_hz } else { s.cfg.gyro_lpf_hz };
+        let notched = s.rpm_filter.apply(g);
+        s.gyro_lpf.update(notched, hz, dt)
     };
     let accel_f = if reset_dynamics {
         s.accel_lpf.reset(a);
@@ -1157,7 +1179,20 @@ fn on_battery(s: &mut State, volts: f32, fx: &mut Out) {
     }
 }
 
+/// eRPM older than this no longer places a motor's notches (µs).
+const RPM_STALE_US: u64 = 20_000;
+
 fn on_telemetry(s: &mut State, erpm: &[Option<u32>; 4], fx: &mut Out) {
+    let cfg = s.cfg;
+    for (i, e) in erpm.iter().enumerate() {
+        let Some(e) = e else { continue };
+        s.rpm_at_us[i] = Some(s.now_us);
+        if s.imu_period > 0.0 {
+            let rotation_hz = *e as f32 / cfg.motor_pole_pairs / 60.0;
+            let harmonics = (cfg.rpm_filter_harmonics as usize).min(rpm::MAX_HARMONICS);
+            s.rpm_filter.set_motor(i, Some(rotation_hz), 1.0 / s.imu_period, harmonics, cfg.rpm_filter_q, cfg.rpm_filter_min_hz);
+        }
+    }
     if !s.armed {
         return;
     }
