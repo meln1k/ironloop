@@ -81,13 +81,13 @@ MUTANTS = {
     "crash lying needs no impact (inverted dive disarms)": [(LIB, "let hit = s.lying_since_us.is_some_and(", "let hit = true || s.lying_since_us.is_some_and(")],
     "crash rules share one timer (roll-out of a dive disarms)": [(
         LIB,
-        "let blocked_for = since(&mut s.blocked_since_us, blocked);",
-        "let blocked_for = if blocked { since(&mut s.blocked_since_us, true).max(lying_for) } else { since(&mut s.blocked_since_us, false) };",
+        "let blocked_for = if blocked { s.blocked_us } else { 0 };",
+        "let blocked_for = if blocked { s.blocked_us.max(lying_for) } else { 0 };",
     )],
-    "crash detect fires at 10 deg tilt": [(LIB, "let lying = tilt > 60f32.to_radians() && rp_motion < 0.5 && propped;", "let lying = tilt > 10f32.to_radians() && rp_motion < 0.5 && propped;")],
+    "crash detect fires at 10 deg tilt": [(LIB, "let lying = tilt > 60f32.to_radians() && rp_motion", "let lying = tilt > 10f32.to_radians() && rp_motion")],
     "crash motion counts spinning flat": [(LIB, "let rp_motion = (slow - up * slow.dot(up)).norm();", "let rp_motion = slow.norm();")],
     "crash detect ignores the accelerometer, fires after 1.5 s": [
-        (LIB, "let lying = tilt > 60f32.to_radians() && rp_motion < 0.5 && propped;", "let lying = tilt > 60f32.to_radians() && rp_motion < 0.5;"),
+        (LIB, "rp_motion < 0.5 + 0.25 * slow.norm() && propped;", "rp_motion < 0.5 + 0.25 * slow.norm();"),
         (CFG, "crash_still_us: 3_000_000,", "crash_still_us: 1_500_000,"),
     ],
     "arming leaves the motors at zero until the next IMU sample": [(LIB, "s.motors = [(idle as u16).clamp(DSHOT_MIN, DSHOT_MAX); 4];", "s.motors = [0; 4];")],
@@ -96,7 +96,7 @@ MUTANTS = {
     "crash impact counts drag braking after a power dive": [(LIB, "if a > cfg.crash_impact && jolt {", "if a > cfg.crash_impact {")],
     "runaway fires on gyro alone": [(LIB, "if pid_high && spinning && (pushed_back || !flown) {", "if spinning {")],
     "runaway detection ends after 0.5 s of throttle alone": [
-        (LIB, "if throttle > cfg.airmode_throttle && (calm || flown) {", "if throttle > cfg.airmode_throttle {"),
+        (LIB, "if throttle > cfg.airmode_throttle && upright && !pid_high && (!spinning || flown) {", "if throttle > cfg.airmode_throttle {"),
         (CFG, "runaway_deactivate_us: 1_000_000,", "runaway_deactivate_us: 500_000,"),
     ],
     # Time.
@@ -150,9 +150,11 @@ def check(seeds):
         fails.add(("firmware build", 0))
     for pkg, extra in (("ironloop-fc", []), ("ironloop-sim", ["--test", "dst"])):
         t = run(["cargo", "test", "-q", "--release", "-p", pkg] + extra)
-        fails |= {(l.split()[1], 0) for l in t.stdout.splitlines() if l.startswith("test ") and l.endswith("FAILED")}
-        if t.returncode != 0 and "test result" not in t.stdout:
-            fails.add((f"{pkg} tests did not build", 0))
+        # `-q` reports a failure as "name --- FAILED".
+        failed = {(m, 0) for m in re.findall(r"^(\S+) --- FAILED$", t.stdout, re.M)}
+        if t.returncode != 0 and not failed:
+            failed = {(f"{pkg} tests failed or did not build", 0)}
+        fails |= failed
     return fails
 
 

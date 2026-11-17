@@ -12,7 +12,7 @@ Events are timestamped IMU samples, RC frames, battery readings, ESC telemetry, 
 
 | Path | What it is |
 | --- | --- |
-| `crates/ironloop-fc` | `no_std` firmware core: estimator, acro/angle rate PID, mixer, arming, failsafe, crash/runaway detection, CRSF and DShot codecs |
+| `crates/ironloop-fc` | `no_std` firmware core: estimator, acro/angle rate PID, mixer, RPM filter, arming, failsafe, crash/runaway detection, motor-fault detection from eRPM, CRSF and DShot codecs |
 | `crates/ironloop-sim` | Deterministic simulation testing: physics, ESCs, battery, wind, noisy IMU, RC link, virtual pilot, seeded workload generator, property monitor, `dst` runner |
 | `crates/ironloop-viz` | Bevy app: fly the firmware by hand, inject faults live, or replay a DST seed. Builds natively and for wasm/WebGL2 |
 | `firmware/mobula6` | Embassy board target (STM32F411CEU6): IMU on SPI1 (BMI270 or ICM-42688-P), ELRS CRSF on USART2, ADC battery, bit-banged bidirectional DShot300 with eRPM via TIM1 + DMA2 |
@@ -64,7 +64,7 @@ failsafe_no_spinup             If the throttle was at the bottom when the link w
 failsafe_bounded               RC lost while armed ends with motors stopped within 35 s.
 failsafe_levels                [flight] One second into failsafe the quad is within 20° of level.
 failsafe_descends              [flight] Six seconds into a failsafe landing the quad sinks at 0.2 m/s or more.
-failsafe_disarms_on_touchdown  A failsafe landing disarms within 2 s of touching down.
+failsafe_disarms_on_touchdown  A failsafe landing disarms within 2 s of touching down upright.
 imu_loss_stops                 No fresh IMU data for 30 ms while armed stops the motors.
 esc_fed                        While armed the ESCs receive a command at least every 5 ms (unless the firmware task stalls).
 crash_stops                    A crashed quad (on the ground, tilted past 60°, not rotating toward upright) stops within 4 s.
@@ -75,7 +75,7 @@ battery_critical_reported      A 1S pack below 3.15 V for 5 s raises a critical 
 motor_fault_reported           A stalled motor commanded hard with telemetry available is reported within 200 ms.
 estimate_tracks                [flight] Estimated tilt stays within 15° of the truth while flying.
 angle_stays_level              [flight] In angle mode the true tilt stays under 75°.
-failsafe_lands_softly          [flight] Failsafe touches down below 2.5 m/s and never disarms above 1 m.
+failsafe_lands_softly          [flight] Failsafe touches down below 2.5 m/s vertical and never disarms above 1 m.
 no_crash                       [flight] Armed touchdowns are slower than 2.5 m/s, outside drops, flips, stick slams.
 pilot_can_arm                  [flight] Flipping the switch on with everything ready (level, still, pack above 3.4 V) arms.
 arm_imu_fresh                  Arming never happens without good IMU data in the last 30 ms.
@@ -86,7 +86,7 @@ no_panic                       The firmware never panics; its overflow checks ar
 runaway_stops                  A quad with its motors swapped never climbs above 1 m and stops within 5 s of throttle-up.
 battery_notice_true            Battery warning/critical only when the pack really was below 3.62 / 3.45 V in the last 2 s.
 motor_fault_true               A motor fault notice only for a motor really stalled or weakened in the last 300 ms.
-link_recovers                  In failsafe with the link back and the switch on, failsafe ends within 1 s.
+link_recovers                  In failsafe with the link back without a gap for 1 s and the switch on, failsafe ends.
 failsafe_holds                 [flight] The failsafe hold neither climbs nor sinks faster than 3 m/s² of acceleration.
 estimate_reconverges           [flight] A tilt estimate off by over 15° (after a flip, say) is back within 10° within 4 s.
 rate_tracks                    [flight] In an acro stick script, rates track the Betaflight-rate setpoint (30 ms lag) within 35% RMS (yaw 50%).
@@ -96,27 +96,27 @@ sag_compensated                [flight] On a sagging pack the averaged motor spe
 
 **Stick scripts.** The virtual pilot sees the truth and closes the loop, which hides poor control. In `stick-script` segments it flies open loop instead: hands off, then a doublet on roll, pitch, and yaw in turn, then hands off. `rate_tracks` and `settles` judge those segments against Betaflight rates, which are written in the monitor and not read from the config.
 
-**Paired runs** in `crates/ironloop-sim/tests/dst.rs` run the same flight twice with one thing changed that the firmware must not care about. Starting the clock below 2³² or at 2⁴⁰ µs, and mounting the IMU in another orientation with a matching configuration, must give bit-identical motor commands. The mount pairing only uses flights where the gyro never clips, because the sensor's range is asymmetric by one LSB. A different heading or an IMU at 1.6, 3.2, or 8 kHz must give the same properties, arming, and altitude within 15%. A snapshot of the whole simulation taken mid-flight must resume to the same trace.
+**Paired runs** in `crates/ironloop-sim/tests/dst.rs` run the same flight twice with one thing changed that the firmware must not care about. Starting the clock below 2³² or at 2⁴⁰ µs, and mounting the IMU in another orientation with a matching configuration, must give bit-identical motor commands. The mount pairing only uses flights where the gyro never clips, because the sensor's range is asymmetric by one LSB. A different heading must give the same properties, arming, and altitude within 15%; an IMU at 1.6, 3.2, or 8 kHz the same properties, arming, and whether it flew. A snapshot of the whole simulation taken mid-flight must resume to the same trace.
 
 **Coverage.** A property that never sees its situation passes without testing anything. Each property counts the steps on which its precondition was live, and the sweep prints in how many seeds that happened, how many seeds had each fault kind start in flight, and the share of simulated time spent airborne. Sweeps of 200 seeds or more fail (`THIN`) when a property is live in fewer than two seeds, a fault kind never starts in flight, or less than a quarter of the time is airborne.
 
 **Metamorphic tests** in `crates/ironloop-fc/src/tests.rs` check the mixer against Betaflight's QuadX table and mirror every input left-right and front-back and require mirrored motor outputs. They need no oracle and catch anything that treats the two sides differently, such as one wrong mixer entry or two axes mixed up; a sign flipped consistently on a whole axis stays symmetric, and the DST catches those.
 
-**Mutants.** `scripts/mutants.py` reintroduces 55 real flight-controller bugs and config mistakes, one at a time, and runs the DST sweep, the firmware unit tests, and the simulator tests against each. It first records what fails on the unmodified firmware, and counts a mutant as caught only when something new fails or more seeds fail a property.
+**Mutants.** `scripts/mutants.py` reintroduces 59 real flight-controller bugs and config mistakes, one at a time, and runs the DST sweep, the firmware unit tests, and the simulator tests against each, and type-checks the board firmware. It first records what fails on the unmodified firmware, and counts a mutant as caught only when something new fails or more seeds fail a property.
 
 **Known limits.**
 
-- RC corruption that passes the CRC (about 1 in 256 corrupted frames) is injected on sticks and the mode switch but not on the arm channel. A single frame with the arm switch read as off disarms in flight, and the firmware cannot tell it from a real switch-off without delaying every disarm.
+- RC corruption that passes the CRC (about 1 in 256 corrupted frames on a real link; the sim makes half of its corrupted frames this kind) is injected on sticks and the mode switch but not on the arm channel. A single frame with the arm switch read as off disarms in flight, and the firmware cannot tell it from a real switch-off without delaying every disarm.
 - A switch moved to on while the link is down arms on the first frame after the link returns. This is intended.
 - The motor-fault properties need bidirectional-DShot eRPM; seeds without telemetry (40%) skip them, and the rest of the properties must hold either way. The core also uses eRPM for an RPM filter (notches at each motor's first three harmonics, then a 200 Hz rather than 150 Hz gyro low-pass); without telemetry it keeps the plain 150 Hz low-pass. The sim's vibration is only at 1× and 2× shaft speed, so it can't judge the third harmonic.
 - The CRSF parser is unit-tested but not in the DST loop; the simulator delivers decoded channels.
-- No automatic disarm may come from how the quad is flown. Crash detection's hands-off rule (lying still, propped by about 1 g) also needs a jolt within 2 s before it, because an inverted fall at terminal speed reads exactly like lying on the ground. That jolt must exceed what thrust and drag can produce in flight, worked out from the learned hover throttle (thrust/weight ≈ 1/hover²): over thrust/weight + 1 g across or against the thrust axis (cutting the throttle after an inverted power dive brakes at that), and over 2 × thrust/weight + 1 g along it (pulling out of a dive). A crash without such a jolt, such as a slow tip-over, stops only when the sticks or angle mode demand a roll or pitch the frame does not follow. Runaway detection runs only until the build has flown once per power-up, and while the sticks are moved it counts only a frame speeding up away from the controller's push, never a stick reversal.
-- `crates/ironloop-sim/FAILING_SEEDS.md` lists the seeds that failed a 200,000-seed overnight sweep, by property.
-- The tilt estimate drifts past 15° after some stick slams and long aggressive sequences (22 of seeds 300–1799).
-- The open-loop failsafe landing touches down at about 2.5 m/s in about 0.1% of seeds (seed 741 of seeds 0–999), right at the limit. Without a barometer the vertical speed estimate can be a few tenths of a m/s off for the whole landing, so the landing probes for descent by taking throttle off until it sinks 0.5 m/s faster, and each probe can leave the descent that much faster.
-- A few crash and failsafe cases are each seen once in seeds 300–1799: a dead motor not stopped within 4 s (445, `crash_stops`), a bent prop holding altitude in failsafe (1257, `failsafe_descends`), and a touchdown not recognised within 2 s (1762).
+- No automatic disarm may come from how the quad is flown. Crash detection's hands-off rule (lying still, propped by about 1 g, for 3 s) also needs a jolt within 2 s before it or a roll-over on the ground, because an inverted fall at terminal speed reads exactly like lying on the ground. The jolt must be over 4 g and exceed what thrust and drag can produce in flight by 15%, worked out from the learned hover throttle (thrust/weight ≈ 1/hover²): over thrust/weight + 1 g across or against the thrust axis (cutting the throttle after an inverted power dive brakes at that), and over 2 × thrust/weight + 1 g along it (pulling out of a dive). A roll-over is a frame that tipped past 60° without the vertical-speed estimate showing more than 2 m/s of fall: a plunge only reads like lying after falling several m/s. A crash with neither, such as landing on its back after a fall faster than 2 m/s without a hard enough hit, stops only when the sticks or angle mode demand a roll or pitch the frame does not follow. Runaway detection runs only until the build has flown once per power-up, and while the sticks are moved it counts only a frame speeding up away from the controller's push, never a stick reversal.
+- `crates/ironloop-sim/FAILING_SEEDS.md` lists the seeds that failed a 200,000-seed overnight sweep, by property, on the first commit (2079703). The firmware and the generator's IMU filter range have changed since, so its seeds and counts are out of date.
+- The tilt estimate drifts past 15° after some stick slams and long aggressive sequences (20 of seeds 300–1799).
+- The open-loop failsafe landing touches down above 2.5 m/s in about 0.1% of seeds (seed 741 at 2.5 m/s in seeds 0–999, seed 1360 at 2.8 m/s in seeds 1000–1799). Without a barometer the vertical speed estimate can be a few tenths of a m/s off for the whole landing, so the landing probes for descent by taking throttle off until it sinks 0.5 m/s faster, and each probe can leave the descent that much faster.
+- One failsafe case is seen in seeds 300–1799: a bent prop climbing about 1 m/s six seconds into the failsafe landing (1257, `failsafe_descends`).
 - `settles` catches ten times the D gain but not five times the P gain: the simulator's motors still lag less than real ones, so high P alone rarely rings.
-- Eight of the 54 mutants survive a 300-seed sweep: hover learning during climbs, no gyro spike rejection, the dt clamp removed, I-term windup at zero throttle, three older crash-detection mutants that the 4 g impact gate now masks, and arming on a stale IMU (harmless here: the same step disarms for `ImuFailure` before any motor command).
+- Six of the 59 mutants survive a 300-seed sweep. Three change nothing reachable: the dt clamp removed (gaps over 5 ms already reset the filters, and the D-term low-pass cancels dt below 2 ms), lying counted from 10° of tilt (the propped check already needs about 50°), and arming on a stale IMU (the same step disarms for `ImuFailure` before any motor command). Three are gaps: an 80° angle limit (the virtual pilot converts the tilt it wants into stick with the firmware's own angle limit, so it compensates), lying without the accelerometer check (the impact and roll-over rules rule out the same cases in the flights the sim makes), and runaway detection switched off after 0.5 s of throttle alone. The last one points at a real weakness: a motors-swapped quad sitting upright on the ground at part throttle for about a second also switches runaway detection off, and crash detection then stops it up to 7 s after throttle-up. The DST pilot always takes off at once, so it never sits there.
 - In a sustained push (about 2.5 m/s² for over a second) the accelerometer's apparent vertical leans about 14° at almost exactly 1 g, so the tilt estimate follows it (seed 89 fails `estimate_tracks` by a hair). Without a velocity sensor there is no clean fix; a lower accelerometer gain made other seeds worse.
 
 ## Fly it in the browser
@@ -144,12 +144,12 @@ Enter DFU by holding the BOOT pad while plugging in USB, or from IronLoop itself
 
 CI (`.github/workflows/ci.yml`) runs those tests and builds the board firmware with warnings as errors; `scripts/mutants.py` also counts a core change that breaks the firmware build. Hardware facts and sources for this board are in `docs/hardware/mobula6-eco-2024.md`.
 
-The board builds the firmware's `Config` from the IMU it finds: the gyro and accelerometer ranges it programs, and the chip's mounting (CW0 for both chips, from Happymodel's factory dump). A panic, or the control loop missing the independent watchdog for about 50 ms, resets the board; the ESCs stop on the missing signal, and arming afterwards needs the arm switch seen off first.
+The board builds the firmware's `Config` from the IMU it finds: the gyro and accelerometer ranges it programs, and the chip's mounting (CW0 for both chips, from Happymodel's factory dump). A panic, or the control loop missing the independent watchdog for about 50 ms (34–94 ms over the LSI clock's tolerance), resets the board; the ESCs stop on the missing signal, and arming afterwards needs the arm switch seen off first.
 
 **Not yet verified on hardware.** Before props go on, check on the bench: which IMU is fitted and its axis orientation, on a BMI270 board and on an ICM-42688 board (tilt the quad, watch attitude), motor order and direction, DShot reaching the ESCs, battery voltage scaling, and LED/beeper polarity. Then the timing checks, from the counters in `control::STATS` (IMU samples, missed data-ready edges, SPI read errors, dropped events, and `step` cycles from the DWT counter). SWD is unavailable, so they need the planned USB diagnostics to read them.
 
 - IMU rate: samples grow at 3.2 kHz with a BMI270 or 2 kHz with an ICM-42688, and missed data-ready edges stay at zero.
-- Step time: the longest `step` (`step_cycles_max`, at 96 MHz) stays well under the sample period (312 µs, 30,000 cycles, for the BMI270), including during stick moves, arming, and disarming.
+- Step time: the longest `step` plus applying its effects (`step_cycles_max`, at 96 MHz) stays well under the sample period (312 µs, 30,000 cycles, for the BMI270), including during stick moves, arming, and disarming.
 - Dead data-ready line: with PA1 disconnected or held low, the quad must refuse to arm (IMU blocker). If it is disconnected while armed, the motors must stop within about 20 ms.
 
 - eRPM: with the quad strapped down and props off, spin each motor up from idle. Its eRPM should rise with throttle, reaching about 72,000 RPM × 6 pole pairs at full throttle on a full pack, and a motor held still while commanded hard must be reported as faulty within about 60 ms. The board sends inverted (bidirectional) DShot by default, which the stock Bluejay 0.19 ESCs answer; ESCs flashed with BLHeli_S need `--features no-erpm`.
