@@ -160,7 +160,7 @@ pub const PROPERTIES: &[(&str, &str)] = &[
     ("no_false_clock_alarm", "The firmware reports the clock going backwards only when it really jumped back."),
     ("battery_critical_reported", "A 1S pack below 3.15 V for 5 s raises a critical battery notice."),
     ("motor_fault_reported", "A stalled motor that is commanded hard with telemetry available is reported within 200 ms."),
-    ("estimate_tracks", "[flight] Estimated tilt stays within 15 deg of the truth while flying."),
+    ("estimate_tracks", "[flight] Estimated tilt stays within 15 deg of the truth while flying, except within 4 s of the gyro saturating."),
     ("angle_stays_level", "[flight] In angle mode the true tilt stays under 75 deg."),
     ("failsafe_lands_softly", "[flight] A failsafe landing touches down below 2.5 m/s vertical and never disarms above 1 m."),
     ("no_crash", "[flight] Armed touchdowns are slower than 2.5 m/s, outside deliberate drops, flips, and stick slams."),
@@ -274,6 +274,8 @@ pub struct Monitor {
     /// (speed, vertical speed downward) in the last airborne step.
     airborne_speed: Option<(f32, f32)>,
     est_bad_since: Option<u64>,
+    /// Last time the true rotation rate was beyond the gyro's range.
+    gyro_saturated_us: Option<u64>,
     runaway_since: Option<u64>,
     below_crit_v_us: Option<u64>,
     below_warn_v_us: Option<u64>,
@@ -320,6 +322,7 @@ impl Monitor {
             last_t: 0,
             airborne_speed: None,
             est_bad_since: None,
+            gyro_saturated_us: None,
             runaway_since: None,
             below_crit_v_us: None,
             below_warn_v_us: None,
@@ -873,7 +876,15 @@ impl Monitor {
         let flying = after.armed && !world.body.on_ground && alt > 0.15;
         let excused = sc.unflyable() || Self::excusing_fault(sc, t);
         let wild = Self::wild(sc, t);
-        if flying && !excused && !wild && matches!(event.kind, EventKind::Imu { .. }) {
+        // A rotation beyond the gyro's range loses the attitude, and in
+        // flight the accelerometer reads mostly thrust, so the estimate
+        // takes a few seconds to come back (Betaflight's too); until then
+        // `estimate_reconverges` judges it instead.
+        if world.body.omega.max_abs() >= sc.imu.gyro_range * 0.97 {
+            self.gyro_saturated_us = Some(t);
+        }
+        let recovering = self.gyro_saturated_us.is_some_and(|s| t - s < REQ_RECONVERGE_US);
+        if flying && !excused && !wild && !recovering && matches!(event.kind, EventKind::Imu { .. }) {
             let est_up = after.attitude.inverse_rotate(Vec3::new(0.0, 0.0, -1.0));
             let true_up = world.body.att.inverse_rotate(Vec3::new(0.0, 0.0, -1.0));
             let err = libm::acosf(est_up.dot(true_up).clamp(-1.0, 1.0)).to_degrees();

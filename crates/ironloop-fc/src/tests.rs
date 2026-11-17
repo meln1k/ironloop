@@ -328,3 +328,25 @@ fn a_stick_reversal_is_no_runaway_but_turning_away_from_the_stick_is() {
         assert_eq!(disarmed, runaway, "angular acceleration {accel}: {:?}", r.notices());
     }
 }
+
+#[test]
+fn a_still_quad_on_the_ground_resets_its_attitude_estimate() {
+    // A crash leaves the estimate wrong (here: the quad lies on its side
+    // but the gyro never saw it roll, as when it saturates). Once it has
+    // sat still for a moment while disarmed, the estimate must match the
+    // accelerometer within a second, not over several.
+    let mut r = Rig::new();
+    r.run(2500, Some(rc(1000, 1000, 1000, 1500)));
+    assert!(r.s.status().attitude.tilt().to_degrees() < 1.0);
+    let side = [0.0, -GRAVITY * 0.866, -GRAVITY * 0.5]; // 60 degrees
+    // It comes to rest spinning about its own yaw axis, which does not
+    // change the estimated tilt but is the movement a crash always has.
+    for i in 0..1700 {
+        r.t += 500;
+        let d = if i % 2 == 0 { 1e-4 } else { -1e-4 };
+        let yaw = if i < 100 { 1.0 } else { 0.0 };
+        r.ev(EventKind::Imu { gyro: [d, 0.0, yaw], accel: side });
+    }
+    let tilt = r.s.status().attitude.tilt().to_degrees();
+    assert!((tilt - 60.0).abs() < 2.0, "tilt estimate {tilt} deg after 0.8 s still");
+}

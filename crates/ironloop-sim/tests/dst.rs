@@ -35,9 +35,13 @@ fn generated_scenarios_hold_every_property_and_replay_identically() {
 /// Seeds 519 and 415 land by failsafe from 10-13 m, which once sped up past
 /// 2.5 m/s: the brake stopped at 98% of hover, and the speed estimate
 /// started from zero at link loss although the quad was already moving.
+/// Seeds 109 and 257 saturate the gyro hitting the ground and punch out,
+/// which once left the tilt estimate 20-27 degrees off for seconds. Seed
+/// 209 rolls hard at 1 g soon after one, which a recovery that believed
+/// any 1 g reading once took for level.
 #[test]
 fn regression_seeds_hold_every_property() {
-    for seed in [1531, 822, 3007, 6875, 3934, 838, 88, 445, 519, 415] {
+    for seed in [1531, 822, 3007, 6875, 3934, 838, 88, 445, 519, 415, 109, 257, 209] {
         let r = run_seed(seed);
         assert!(r.violations.is_empty(), "seed {seed} [{}]: {:?}", r.name, r.violations);
     }

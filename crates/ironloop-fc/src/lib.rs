@@ -300,6 +300,12 @@ pub struct State {
     ang_accel: Vec3,
     gyro_saturated: bool,
     fast_converge_until_us: u64,
+    /// After gyro saturation: until then, a clean 1 g reading far from the
+    /// estimate is believed at the fast gain (see `estimate_attitude`).
+    recovering_until_us: u64,
+    /// Disarmed and still (gyro and accelerometer quiet) since then; drives
+    /// the attitude reset on the ground.
+    still_since_us: Option<u64>,
 
     attitude: Quat,
     est_integral: Vec3,
@@ -404,6 +410,8 @@ impl State {
             ang_accel: Vec3::ZERO,
             gyro_saturated: false,
             fast_converge_until_us: 0,
+            recovering_until_us: 0,
+            still_since_us: None,
             attitude: Quat::IDENTITY,
             est_integral: Vec3::ZERO,
             rc: Rc {
@@ -668,6 +676,7 @@ fn on_imu(s: &mut State, gyro: [f32; 3], accel: [f32; 3], fx: &mut Out) {
         // The attitude estimate integrated clipped rates; lean on the
         // accelerometer until it has re-converged.
         s.fast_converge_until_us = now + 1_500_000;
+        s.recovering_until_us = now + 5_000_000;
     }
     s.gyro_saturated = saturated;
 
@@ -741,6 +750,13 @@ fn calibrate(s: &mut State, g: Vec3, a: Vec3, fx: &mut Out) {
     }
 }
 
+/// Attitude reset on the ground (as in Betaflight): disarmed and still for
+/// this long (µs), the estimate snaps to the accelerometer for
+/// `GROUND_RESET_US`. Any movement starts it over, so righting a crashed
+/// quad by hand or with turtle mode resets it again.
+const GROUND_RESET_QUIET_US: u64 = 250_000;
+const GROUND_RESET_US: u64 = 500_000;
+
 /// Mahony complementary filter.
 fn estimate_attitude(s: &mut State, gyro: Vec3, accel: Vec3, dt: f32, reset: bool) {
     let a_norm = accel.norm();
@@ -751,12 +767,21 @@ fn estimate_attitude(s: &mut State, gyro: Vec3, accel: Vec3, dt: f32, reset: boo
     // Specific force is only a gravity reference when the quad is not
     // accelerating; trust it less the further it is from 1 g.
     let dev = (a_norm / GRAVITY - 1.0).abs();
-    let fast = s.now_us < s.fast_converge_until_us || !s.cal.done;
+    // In flight the accelerometer reads mostly thrust, which looks level
+    // whatever the tilt while the quad speeds up or slows down, so a crash
+    // can leave the estimate off for seconds. Sitting still on the ground
+    // it reads pure gravity: trust it fully then.
+    let still = s.cal.done && !s.armed && gyro.max_abs() < 15f32.to_radians() && dev < 0.2;
+    let still_for = if still { s.now_us - *s.still_since_us.get_or_insert(s.now_us) } else { s.still_since_us = None; 0 };
+    let ground_reset = (GROUND_RESET_QUIET_US..GROUND_RESET_QUIET_US + GROUND_RESET_US).contains(&still_for);
+    let fast = s.now_us < s.fast_converge_until_us || !s.cal.done || ground_reset;
     // After calibration or gyro saturation the estimate may be far off, so
     // any roughly-1 g reading beats the gyro integral.
     let band = if fast { 0.5 } else { 0.1 };
     let weight = (1.0 - dev / band).clamp(0.0, 1.0);
-    let kp = if fast {
+    let kp: f32 = if ground_reset {
+        25.0
+    } else if fast {
         6.0
     } else if s.armed {
         0.5
@@ -767,7 +792,16 @@ fn estimate_attitude(s: &mut State, gyro: Vec3, accel: Vec3, dt: f32, reset: boo
     if weight > 0.0 && !s.gyro_saturated {
         let up_est = s.attitude.inverse_rotate(Vec3::new(0.0, 0.0, -1.0));
         let err = up_meas.cross(up_est);
-        if s.cal.done && !fast {
+        // After a saturation the fast window often passes while the pilot
+        // punches out and the accelerometer reads thrust, far from 1 g.
+        // For a few seconds more, a clean 1 g reading more than 10 degrees
+        // from the estimate while the quad hardly turns is the estimate's
+        // fault: pull at the fast gain. Only then: a punch at 1.3 g, or a
+        // fast roll at 1 g, still reads level while tilted, and believing
+        // that fast tips angle mode over.
+        let recovering = s.now_us < s.recovering_until_us && dev < 0.1 && gyro.norm() < 1.0 && err.norm() > 0.17;
+        let kp = if recovering { kp.max(6.0) } else { kp };
+        if s.cal.done && !fast && !recovering {
             s.est_integral = s.est_integral + err * (0.3 * weight * dt);
             // Residual gyro bias from warm-up drift after calibration.
             let lim = 0.1;
