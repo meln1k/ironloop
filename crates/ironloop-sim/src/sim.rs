@@ -90,10 +90,18 @@ pub struct Sim {
     queue: BinaryHeap<Reverse<(u64, u64, Ev)>>,
     seq: u64,
     pending_motors: VecDeque<[u16; 4]>,
-    /// IMU samples stamped at data-ready, waiting for their SPI read.
-    pending_imu: VecDeque<(u64, EventKind)>,
-    /// Events held in the board's 32-deep queue while the firmware stalls.
+    /// The board's control task reads one IMU sample at a time: the sample
+    /// being read (stamped at data-ready), and the newest data-ready that
+    /// came during that read. An older unread one is lost.
+    imu_read: Option<(u64, EventKind)>,
+    imu_waiting: Option<(u64, EventKind)>,
+    /// Events that arrived during an IMU read; the control task steps them
+    /// after the sample.
+    held: Vec<(u64, EventKind)>,
+    /// Events held in the board's 32-deep queue while the firmware stalls,
+    /// and the newest data-ready from the stall.
     stalled: Vec<(u64, EventKind)>,
+    stalled_imu: Option<(u64, EventKind)>,
     rng_board: Rng,
     imu_next_ideal: f64,
     rng_imu: Rng,
@@ -143,8 +151,11 @@ impl Sim {
             queue: BinaryHeap::new(),
             seq: 0,
             pending_motors: VecDeque::new(),
-            pending_imu: VecDeque::new(),
+            imu_read: None,
+            imu_waiting: None,
+            held: Vec::new(),
             stalled: Vec::new(),
+            stalled_imu: None,
             rng_board: Rng::fork(seed, "board"),
             imu_next_ideal: 0.0,
             rng_imu: Rng::fork(seed, "imu"),
@@ -339,8 +350,14 @@ impl Sim {
                 self.schedule(t + TICK_US, Ev::Tick);
             }
             Ev::ImuDeliver => {
-                if let Some((stamp, kind)) = self.pending_imu.pop_front() {
+                if let Some((stamp, kind)) = self.imu_read.take() {
                     self.deliver_at(stamp, kind);
+                }
+                for (stamp, kind) in std::mem::take(&mut self.held) {
+                    self.deliver_at(stamp, kind);
+                }
+                if let Some((stamp, kind)) = self.imu_waiting.take() {
+                    self.read_imu(stamp, kind);
                 }
             }
             Ev::ApplyMotors => {
@@ -446,10 +463,24 @@ impl Sim {
         self.deliver_imu(EventKind::Imu { gyro: g, accel: a });
     }
 
-    /// The board stamps a sample at data-ready and queues it after the SPI
-    /// read, so events other tasks stamp in between reach the firmware first.
+    /// The board stamps a sample at data-ready (in the interrupt) and steps
+    /// it after the SPI read.
     fn deliver_imu(&mut self, kind: EventKind) {
-        self.pending_imu.push_back((self.t_us, kind));
+        self.data_ready(self.t_us, kind);
+    }
+
+    fn data_ready(&mut self, stamp: u64, kind: EventKind) {
+        if self.fault_active(|k| matches!(k, FaultKind::FcStall)).is_some() {
+            self.stalled_imu = Some((stamp, kind));
+        } else if self.imu_read.is_some() {
+            self.imu_waiting = Some((stamp, kind));
+        } else {
+            self.read_imu(stamp, kind);
+        }
+    }
+
+    fn read_imu(&mut self, stamp: u64, kind: EventKind) {
+        self.imu_read = Some((stamp, kind));
         self.schedule(self.t_us + self.sc.imu.read_delay_us, Ev::ImuDeliver);
     }
 
@@ -497,16 +528,30 @@ impl Sim {
         self.deliver_at(self.t_us, kind);
     }
 
-    /// Passes an event stamped at `stamp` through the board's event queue.
+    /// Passes an event stamped at `stamp` to the board's control task.
     fn deliver_at(&mut self, stamp: u64, kind: EventKind) {
+        let is_imu = matches!(kind, EventKind::Imu { .. });
         if self.fault_active(|k| matches!(k, FaultKind::FcStall)).is_some() {
-            if self.stalled.len() < 32 {
-                self.stalled.push((stamp, kind));
+            match kind {
+                EventKind::Imu { .. } => self.stalled_imu = Some((stamp, kind)),
+                // The control task makes its own ticks; a stalled one makes none.
+                EventKind::Tick => {}
+                _ if self.stalled.len() < 32 => self.stalled.push((stamp, kind)),
+                _ => {}
             }
             return;
         }
+        // After a stall the task steps the queue first, then reads the newest
+        // data-ready.
         for (stamp, kind) in std::mem::take(&mut self.stalled) {
             self.step_fc(stamp, kind);
+        }
+        if let Some((stamp, kind)) = self.stalled_imu.take() {
+            self.data_ready(stamp, kind);
+        }
+        if !is_imu && self.imu_read.is_some() {
+            self.held.push((stamp, kind));
+            return;
         }
         if let Some(f) = self.fault_active(|k| matches!(k, FaultKind::EventDrop { .. })) {
             let FaultKind::EventDrop { p } = f.kind else { unreachable!() };

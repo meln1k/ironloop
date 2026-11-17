@@ -26,9 +26,9 @@ pub struct ImuModel {
     pub vib_accel: f32,
     pub gyro_range: f32,
     pub accel_range: f32,
-    /// Time from the data-ready timestamp to the event reaching the firmware
-    /// (the board stamps before the SPI read), µs. Events stamped later by
-    /// other tasks can overtake it, so the firmware sees time step back.
+    /// Time from the data-ready timestamp to the sample's step: the SPI
+    /// read plus waiting for the control task, µs. Events that arrive in
+    /// between wait for it, since the same task steps them.
     pub read_delay_us: u64,
     /// The chip's own digital low-pass (Hz, two first-order stages): gyro
     /// and accelerometer data lag the motion by about 1/(pi * f) seconds

@@ -52,18 +52,18 @@ impl Dshot {
 
     /// Sends one frame per motor. Values are DShot commands: 0 stops,
     /// 48..=2047 is throttle. Takes about 55 µs on the wire and returns
-    /// immediately; a call during a transfer restarts it with the new values.
+    /// as soon as it starts. A call during a frame first waits for that
+    /// frame to finish, so a frame is never cut short.
     pub fn write(&mut self, values: [u16; 4]) {
         let frames = values.map(|v| dshot_frame(v, false, false));
-        // SAFETY: the DMA stream is stopped below before the table changes,
-        // and only this driver (a single owner) touches it.
+        self.wait_idle();
+        // SAFETY: the DMA stream has finished (above) before the table
+        // changes, and only this driver (a single owner) touches it.
         let table = unsafe { &mut *(&raw mut TABLE) };
         let st = pac::DMA2.st(STREAM);
 
         self.timer.stop();
         self.timer.enable_update_dma(false);
-        st.cr().modify(|w| w.set_en(false));
-        while st.cr().read().en() {}
 
         for bit in 0..16 {
             let mask = 0x8000u16 >> bit;
@@ -103,5 +103,11 @@ impl Dshot {
         self.timer.reset();
         self.timer.enable_update_dma(true);
         self.timer.start();
+    }
+
+    /// Waits until the frame on the wire, if any, has finished (at most
+    /// about 55 µs). The stream disables itself after its last word.
+    pub fn wait_idle(&self) {
+        while pac::DMA2.st(STREAM).cr().read().en() {}
     }
 }

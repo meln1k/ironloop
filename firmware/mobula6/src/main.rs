@@ -4,12 +4,12 @@
 //! function the simulator and the browser run. This crate only turns
 //! hardware into timestamped events and effects back into hardware:
 //!
-//! - `imu_task`: IMU data-ready interrupt → SPI read → `Imu` event
-//! - `rc_task`: ELRS CRSF bytes on USART2 → `Rc` event
-//! - `battery_task`: ADC VBAT/current at 50 Hz → `Battery` event
-//! - `tick_task`: 1 kHz → `Tick` event
-//! - `fc_task`: owns the firmware `State`, runs `step` on each event and
-//!   applies the effects (DShot, status LED, beeper, DFU reboot).
+//! - `control::control_task`, on a high-priority interrupt executor: owns
+//!   the firmware `State`, reads the IMU on data-ready, generates the 1 kHz
+//!   `Tick`, runs `step` on each event and applies the effects (DShot,
+//!   status LED, beeper, DFU reboot).
+//! - `rc_task`, thread mode: ELRS CRSF bytes on USART2 → `Rc` event
+//! - `battery_task`, thread mode: ADC VBAT/current at 50 Hz → `Battery` event
 //!
 //! Pinout and clocking come from docs/hardware notes for this board; see
 //! README for what still needs a bench check.
@@ -18,49 +18,45 @@
 #![no_main]
 
 mod bmi270_config;
+mod control;
 mod dshot;
 mod imu;
 
 use core::mem::MaybeUninit;
 
-use embassy_executor::Spawner;
-use embassy_stm32::adc::{Adc, AdcChannel, AnyAdcChannel, SampleTime};
-use embassy_stm32::exti::{self, ExtiInput};
-use embassy_stm32::mode::Async;
+use control::send;
+use embassy_executor::{InterruptExecutor, Spawner};
 use embassy_stm32::Peri;
+use embassy_stm32::adc::{Adc, AdcChannel, AnyAdcChannel, SampleTime};
+use embassy_stm32::exti::{ExtiInput, TriggerEdge};
 use embassy_stm32::gpio::{AnyPin, Level, Output, Pull, Speed};
+use embassy_stm32::interrupt::{InterruptExt, Priority};
 use embassy_stm32::peripherals::{ADC1, DMA1_CH5, DMA2_CH0, DMA2_CH3, USART2};
 use embassy_stm32::spi::{self, Spi};
 use embassy_stm32::time::Hertz;
 use embassy_stm32::usart::{self, RingBufferedUartRx, UartRx};
 use embassy_stm32::{bind_interrupts, dma, interrupt};
-use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
-use embassy_sync::channel::Channel;
-use embassy_time::{Duration, Instant, Ticker, with_timeout};
+use embassy_time::{Duration, Ticker};
+use ironloop_fc::EventKind;
 use ironloop_fc::proto::CrsfParser;
-use ironloop_fc::{Effect, Event, EventKind, State, step};
 use panic_halt as _;
 use static_cell::StaticCell;
 
 bind_interrupts!(struct Irqs {
-    EXTI1 => exti::InterruptHandler<interrupt::typelevel::EXTI1>;
     USART2 => usart::InterruptHandler<USART2>;
     DMA1_STREAM5 => dma::InterruptHandler<DMA1_CH5>;
     DMA2_STREAM0 => dma::InterruptHandler<DMA2_CH0>;
     DMA2_STREAM3 => dma::InterruptHandler<DMA2_CH3>;
 });
 
-/// Every input to the firmware goes through this queue, in arrival order.
-static EVENTS: Channel<CriticalSectionRawMutex, Event, 32> = Channel::new();
+/// Runs the control task. SPI5 is unused on this board; its interrupt only
+/// schedules the executor.
+static CONTROL: InterruptExecutor = InterruptExecutor::new();
 
-fn now_us() -> u64 {
-    Instant::now().as_micros()
-}
-
-fn send(kind: EventKind) {
-    // A full queue means the firmware is behind; dropping a sample is the
-    // same as a sensor gap, which the firmware already handles.
-    let _ = EVENTS.try_send(Event { t_us: now_us(), kind });
+#[interrupt]
+unsafe fn SPI5() {
+    // SAFETY: SPI5 is the interrupt `CONTROL` was started on.
+    unsafe { CONTROL.on_interrupt() }
 }
 
 // ---- DFU bootloader entry -------------------------------------------------
@@ -93,49 +89,13 @@ fn jump_to_bootloader_if_requested() {
     }
 }
 
-fn reboot_to_bootloader() -> ! {
+pub fn reboot_to_bootloader() -> ! {
     // SAFETY: plain volatile store to a word only this module uses.
     unsafe { core::ptr::write_volatile((&raw mut BOOT_FLAG).cast::<u32>(), BOOT_MAGIC) };
     cortex_m::peripheral::SCB::sys_reset();
 }
 
 // ---- Tasks ----------------------------------------------------------------
-
-#[embassy_executor::task]
-async fn fc_task(mut motors: dshot::Dshot, mut led: Output<'static>, mut beeper: Output<'static>) {
-    let mut state = Some(State::default());
-    loop {
-        let event = EVENTS.receive().await;
-        let (next, effects) = step(state.take().expect("state"), &event);
-        state = Some(next);
-        for effect in effects {
-            match effect {
-                Effect::Motors(m) => motors.write(m),
-                // Status LED on PC13 is active-low.
-                Effect::Led(on) => led.set_level(if on { Level::Low } else { Level::High }),
-                Effect::Beeper(on) => beeper.set_level(Level::from(on)),
-                Effect::Notice(_) => {}
-                Effect::RebootToBootloader => {
-                    motors.write([0; 4]);
-                    reboot_to_bootloader();
-                }
-            }
-        }
-    }
-}
-
-#[embassy_executor::task]
-async fn imu_task(mut imu: imu::Imu, mut drdy: ExtiInput<'static, Async>) {
-    loop {
-        // Never wait more than 2 ms: a dead data-ready line then shows up as
-        // stale (repeated) samples, which the firmware treats as IMU failure.
-        let _ = with_timeout(Duration::from_millis(2), drdy.wait_for_rising_edge()).await;
-        let t_us = now_us();
-        if let Ok((gyro, accel)) = imu.sample().await {
-            let _ = EVENTS.try_send(Event { t_us, kind: EventKind::Imu { gyro, accel } });
-        }
-    }
-}
 
 #[embassy_executor::task]
 async fn rc_task(mut rx: RingBufferedUartRx<'static>) {
@@ -172,15 +132,6 @@ async fn battery_task(mut adc: Adc<'static, ADC1>, mut vbat: AnyAdcChannel<'stat
     }
 }
 
-#[embassy_executor::task]
-async fn tick_task() {
-    let mut ticker = Ticker::every(Duration::from_millis(1));
-    loop {
-        ticker.next().await;
-        send(EventKind::Tick);
-    }
-}
-
 // ---- Board bring-up -------------------------------------------------------
 
 fn clocks() -> embassy_stm32::Config {
@@ -210,26 +161,41 @@ async fn main(spawner: Spawner) {
     jump_to_bootloader_if_requested();
     let p = embassy_stm32::init(clocks());
 
+    if let Some(mut core) = cortex_m::Peripherals::take() {
+        // Cycle counter for `control::STATS`.
+        core.DCB.enable_trace();
+        core.DWT.enable_cycle_counter();
+    }
+
     let led = Output::new(p.PC13, Level::High, Speed::Low); // off
     let beeper = Output::new(p.PC15, Level::Low, Speed::Low);
     let pin = |o: Peri<'static, AnyPin>| Output::new(o, Level::Low, Speed::Medium);
     let motors = dshot::Dshot::new(p.TIM1, p.DMA2_CH5, [pin(p.PB10.into()), pin(p.PB6.into()), pin(p.PB7.into()), pin(p.PB8.into())]);
     // The firmware streams stop commands from the first IMU sample; until
     // then the ESCs see an idle-low line, which they treat as no signal.
-    spawner.spawn(fc_task(motors, led, beeper).unwrap());
-    spawner.spawn(tick_task().unwrap());
 
     let mut spi_cfg = spi::Config::default();
     spi_cfg.mode = spi::MODE_3;
     spi_cfg.frequency = Hertz(1_000_000);
     let spi = Spi::new(p.SPI1, p.PA5, p.PA7, p.PA6, p.DMA2_CH3, p.DMA2_CH0, Irqs, spi_cfg);
     let cs = Output::new(p.PA4, Level::High, Speed::VeryHigh);
-    let drdy = ExtiInput::new(p.PA1, p.EXTI1, Pull::Down, Irqs);
     // Without an IMU no `Imu` events arrive, so the firmware reports the
     // IMU arming blocker and never spins the motors.
-    if let Ok(imu) = imu::Imu::init(spi, cs).await {
-        spawner.spawn(imu_task(imu, drdy).unwrap());
-    }
+    let imu = imu::Imu::init(spi, cs).await.ok();
+
+    // The control loop starts only now, so gyro calibration (timed from the
+    // first event) does not run while the IMU is still being set up.
+    // Priorities, most urgent first: data-ready stamping and the time
+    // driver and DMA (P0, embassy's default), then the control loop (P1),
+    // then everything in thread mode.
+    let drdy = ExtiInput::new_blocking(p.PA1, p.EXTI1, Pull::Down, TriggerEdge::Rising);
+    interrupt::EXTI1.set_priority(Priority::P0);
+    // SAFETY: `control::EXTI1` handles this interrupt and shares nothing
+    // with code that relies on it being masked.
+    unsafe { interrupt::EXTI1.enable() };
+    interrupt::SPI5.set_priority(Priority::P1);
+    let control = CONTROL.start(interrupt::SPI5);
+    control.spawn(control::control_task(imu, drdy, motors, led, beeper).unwrap());
 
     let mut uart_cfg = usart::Config::default();
     uart_cfg.baudrate = 420_000; // CRSF
