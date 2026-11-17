@@ -1085,7 +1085,13 @@ fn on_rc(s: &mut State, channels: &[u16; RC_CHANNELS], fx: &mut Out) {
             s.last_impact_us = None;
             s.motor_faults = [false; 4];
             s.motor_fault_since_us = [None; 4];
+            // Spin up to idle now. Until the next IMU sample runs the
+            // controller, the keep-alive tick repeats this command; left at
+            // the disarmed zeros it would hold the motors stopped while armed.
+            let idle = DSHOT_MIN as f32 + roundf(s.cfg.motor_idle * (DSHOT_MAX - DSHOT_MIN) as f32);
+            s.motors = [(idle as u16).clamp(DSHOT_MIN, DSHOT_MAX); 4];
             push(fx, Effect::Notice(Notice::Armed(s.rc.mode)));
+            push(fx, Effect::Motors(s.motors));
         } else {
             push(fx, Effect::Notice(Notice::ArmingBlocked(blockers)));
         }

@@ -18,9 +18,11 @@ fn generated_scenarios_hold_every_property_and_replay_identically() {
 /// second, which once switched runaway detection off before it tumbled.
 /// Seed 822 re-arms after a drop and slams the sticks at once, which a
 /// runaway check that waits for calm flight mistook for a runaway.
+/// Seed 3007 arms during an IMU dropout, which once left the motors at
+/// the disarmed zeros while armed until the next sample.
 #[test]
 fn regression_seeds_hold_every_property() {
-    for seed in [1531, 822] {
+    for seed in [1531, 822, 3007] {
         let r = run_seed(seed);
         assert!(r.violations.is_empty(), "seed {seed} [{}]: {:?}", r.name, r.violations);
     }
