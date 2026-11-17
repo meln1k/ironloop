@@ -22,9 +22,12 @@ fn generated_scenarios_hold_every_property_and_replay_identically() {
 /// the disarmed zeros while armed until the next sample.
 /// Seed 6875 is re-armed mid-fall after flying fine and hits the ground,
 /// which runaway detection once took for a build that cannot fly.
+/// Seed 3934 has its motor wires swapped and motor 1 losing sync, which
+/// the firmware reports on output 0; the monitor once judged that report
+/// against physical motor 0.
 #[test]
 fn regression_seeds_hold_every_property() {
-    for seed in [1531, 822, 3007, 6875] {
+    for seed in [1531, 822, 3007, 6875, 3934] {
         let r = run_seed(seed);
         assert!(r.violations.is_empty(), "seed {seed} [{}]: {:?}", r.name, r.violations);
     }

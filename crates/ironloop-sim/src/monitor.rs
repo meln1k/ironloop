@@ -215,6 +215,12 @@ pub struct Stats {
     pub faults_in_flight: Vec<String>,
 }
 
+/// The physical motor that motor output `i` drives (the build may have two
+/// motor wires swapped, as the simulator wires them).
+fn wired(sc: &Scenario, i: usize) -> usize {
+    if sc.motors_swapped { [1, 0, 2, 3][i] } else { i }
+}
+
 pub fn fault_name(k: &FaultKind) -> String {
     format!("{k:?}").split([' ', '{', '(']).next().unwrap_or("").to_string()
 }
@@ -240,6 +246,8 @@ pub struct Monitor {
     inverted_since: Option<u64>,
     crit_since: Option<u64>,
     crit_reported: bool,
+    /// Indexed by motor output (as the firmware numbers them), not by the
+    /// physical motor: with the wires swapped, output 0 drives motor 1.
     stall_since: [Option<u64>; 4],
     fault_reported: [bool; 4],
     failsafe_since: Option<u64>,
@@ -255,6 +263,7 @@ pub struct Monitor {
     runaway_since: Option<u64>,
     below_crit_v_us: Option<u64>,
     below_warn_v_us: Option<u64>,
+    /// Per motor output, like `fault_reported`.
     motor_bad_us: [Option<u64>; 4],
     rc_run_since: u64,
     hold_vz: Option<f32>,
@@ -398,7 +407,7 @@ impl Monitor {
             self.below_warn_v_us = Some(t);
         }
         for i in 0..4 {
-            if world.motors[i].health != MotorHealth::Ok {
+            if world.motors[wired(sc, i)].health != MotorHealth::Ok {
                 self.motor_bad_us[i] = Some(t);
             }
         }
@@ -826,7 +835,7 @@ impl Monitor {
         let telemetry_ok =
             sc.esc_telemetry && !sc.faults.iter().any(|f| f.active(t) && matches!(f.kind, FaultKind::TelemetryLoss));
         for i in 0..4 {
-            let stalled = matches!(world.motors[i].health, MotorHealth::Dead | MotorHealth::Desync);
+            let stalled = matches!(world.motors[wired(sc, i)].health, MotorHealth::Dead | MotorHealth::Desync);
             let hard = after.motors[i] > DSHOT_MIN + 800;
             if after.armed && stalled && hard && telemetry_ok {
                 self.live("motor_fault_reported");
