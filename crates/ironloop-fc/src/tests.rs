@@ -106,8 +106,8 @@ fn rc_loss_while_flying_lands_then_disarms() {
 #[test]
 fn rate_curve_matches_betaflight() {
     let r = Rates { rc_rate: 1.0, super_rate: 0.7, expo: 0.0 };
-    assert!((rate_curve(&r, 1.0).to_degrees() - 666.67).abs() < 0.1);
-    assert!((rate_curve(&r, 0.5).to_degrees() - 153.85).abs() < 0.1);
+    assert!((control::rate_curve(&r, 1.0).to_degrees() - 666.67).abs() < 0.1);
+    assert!((control::rate_curve(&r, 0.5).to_degrees() - 153.85).abs() < 0.1);
 }
 
 #[test]
@@ -298,7 +298,7 @@ fn mixer_matches_betaflight_quad_x() {
     // Betaflight's pitch and yaw outputs have the opposite sign of the FRD
     // axes used here.
     const BF: [[f32; 3]; 4] = [[-1.0, 1.0, -1.0], [-1.0, -1.0, 1.0], [1.0, 1.0, 1.0], [1.0, -1.0, -1.0]];
-    for (m, bf) in super::MIX.iter().zip(BF) {
+    for (m, bf) in control::MIX.iter().zip(BF) {
         assert_eq!(*m, [bf[0], -bf[1], -bf[2]]);
     }
 }

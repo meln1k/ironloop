@@ -52,6 +52,12 @@ impl Vec3 {
     pub fn mul_elem(self, o: Vec3) -> Vec3 {
         Vec3::new(self.x * o.x, self.y * o.y, self.z * o.z)
     }
+    pub fn min(self, o: Vec3) -> Vec3 {
+        Vec3::new(self.x.min(o.x), self.y.min(o.y), self.z.min(o.z))
+    }
+    pub fn max(self, o: Vec3) -> Vec3 {
+        Vec3::new(self.x.max(o.x), self.y.max(o.y), self.z.max(o.z))
+    }
 }
 
 impl Add for Vec3 {
@@ -92,6 +98,18 @@ pub struct Quat {
     pub z: f32,
 }
 
+impl Mul for Quat {
+    type Output = Quat;
+    fn mul(self, o: Quat) -> Quat {
+        Quat {
+            w: self.w * o.w - self.x * o.x - self.y * o.y - self.z * o.z,
+            x: self.w * o.x + self.x * o.w + self.y * o.z - self.z * o.y,
+            y: self.w * o.y - self.x * o.z + self.y * o.w + self.z * o.x,
+            z: self.w * o.z + self.x * o.y - self.y * o.x + self.z * o.w,
+        }
+    }
+}
+
 impl Default for Quat {
     fn default() -> Self {
         Self::IDENTITY
@@ -122,16 +140,7 @@ impl Quat {
         let qz = Quat::from_axis_angle(Vec3::new(0.0, 0.0, 1.0), yaw);
         let qy = Quat::from_axis_angle(Vec3::new(0.0, 1.0, 0.0), pitch);
         let qx = Quat::from_axis_angle(Vec3::new(1.0, 0.0, 0.0), roll);
-        qz.mul(qy).mul(qx)
-    }
-
-    pub fn mul(self, o: Quat) -> Quat {
-        Quat {
-            w: self.w * o.w - self.x * o.x - self.y * o.y - self.z * o.z,
-            x: self.w * o.x + self.x * o.w + self.y * o.z - self.z * o.y,
-            y: self.w * o.y - self.x * o.z + self.y * o.w + self.z * o.x,
-            z: self.w * o.z + self.x * o.y - self.y * o.x + self.z * o.w,
-        }
+        qz * qy * qx
     }
 
     pub fn conj(self) -> Quat {
@@ -159,9 +168,14 @@ impl Quat {
         self.conj().rotate(v)
     }
 
+    /// The world's up direction expressed in the body frame.
+    pub fn up_in_body(self) -> Vec3 {
+        self.inverse_rotate(Vec3::new(0.0, 0.0, -1.0))
+    }
+
     /// Integrates a body-frame angular rate (rad/s) over `dt` seconds.
     pub fn integrate(self, omega_body: Vec3, dt: f32) -> Quat {
-        self.mul(Quat::from_rotation_vector(omega_body * dt)).normalized()
+        (self * Quat::from_rotation_vector(omega_body * dt)).normalized()
     }
 
     /// Returns (roll, pitch, yaw) in radians.
@@ -180,6 +194,21 @@ impl Quat {
 
     pub fn is_finite(self) -> bool {
         self.w.is_finite() && self.x.is_finite() && self.y.is_finite() && self.z.is_finite()
+    }
+}
+
+/// First-order low-pass filter on each component of a vector.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Lpf {
+    pub y: Vec3,
+}
+
+impl Lpf {
+    pub fn update(&mut self, x: Vec3, cutoff_hz: f32, dt: f32) -> Vec3 {
+        let rc = 1.0 / (2.0 * core::f32::consts::PI * cutoff_hz);
+        let k = dt / (rc + dt);
+        self.y += (x - self.y) * k;
+        self.y
     }
 }
 

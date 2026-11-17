@@ -12,14 +12,19 @@
 #![no_std]
 
 pub mod config;
+mod control;
+mod failsafe;
+mod health;
+mod imu;
 pub mod math;
+mod protect;
 pub mod proto;
 pub mod rpm;
 
 pub use config::{AxisPid, Config, ImuAlignment, Rates};
 use heapless::Vec;
-use libm::roundf;
-use math::{Quat, Vec3, tilt_error, up_in_body};
+use imu::GyroCal;
+use math::{Lpf, Quat, Vec3};
 
 pub const RC_CHANNELS: usize = 8;
 /// Upper bound on effects produced by a single step.
@@ -38,6 +43,10 @@ pub const GRAVITY: f32 = 9.80665;
 pub const DSHOT_STOP: u16 = 0;
 pub const DSHOT_MIN: u16 = 48;
 pub const DSHOT_MAX: u16 = 2047;
+
+/// Throttle (0..1) at or below which the stick counts as down: arming is
+/// allowed, the I-term rests, and a link lost there was lost on the ground.
+const THROTTLE_LOW: f32 = 0.05;
 
 /// Channel order (AETR, as sent by ExpressLRS over CRSF).
 pub mod ch {
@@ -197,47 +206,6 @@ pub struct Status {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-struct Pt1 {
-    y: f32,
-}
-
-impl Pt1 {
-    fn update(&mut self, x: f32, cutoff_hz: f32, dt: f32) -> f32 {
-        let rc = 1.0 / (2.0 * core::f32::consts::PI * cutoff_hz);
-        let k = dt / (rc + dt);
-        self.y += k * (x - self.y);
-        self.y
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Default)]
-struct Pt1v {
-    x: Pt1,
-    y: Pt1,
-    z: Pt1,
-}
-
-impl Default for Pt1 {
-    fn default() -> Self {
-        Pt1 { y: 0.0 }
-    }
-}
-
-impl Pt1v {
-    fn update(&mut self, v: Vec3, hz: f32, dt: f32) -> Vec3 {
-        Vec3::new(self.x.update(v.x, hz, dt), self.y.update(v.y, hz, dt), self.z.update(v.z, hz, dt))
-    }
-    fn reset(&mut self, v: Vec3) {
-        self.x.y = v.x;
-        self.y.y = v.y;
-        self.z.y = v.z;
-    }
-    fn get(&self) -> Vec3 {
-        Vec3::new(self.x.y, self.y.y, self.z.y)
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq)]
 struct Rc {
     last_valid_us: Option<u64>,
     /// Start of the current run of valid frames (no gap above the timeout).
@@ -248,21 +216,6 @@ struct Rc {
     throttle: f32,
     arm_switch: bool,
     mode: FlightMode,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq)]
-struct GyroCal {
-    done: bool,
-    start_us: u64,
-    sum: Vec3,
-    min: Vec3,
-    max: Vec3,
-    count: u32,
-    bias: Vec3,
-    /// Sum of accelerometer magnitudes, and their mean once done: what
-    /// this sensor reads for 1 g at rest.
-    accel_sum: f32,
-    accel_1g: f32,
 }
 
 /// The complete firmware state. Everything the firmware knows lives here.
@@ -281,20 +234,20 @@ pub struct State {
     /// in a row have been rejected since.
     last_accepted_gyro: Option<Vec3>,
     spike_run: u8,
-    gyro_lpf: Pt1v,
+    gyro_lpf: Lpf,
     rpm_filter: rpm::RpmFilter,
     /// When each motor's eRPM last arrived; the RPM filter drops a motor
     /// whose telemetry goes stale.
     rpm_at_us: [Option<u64>; 4],
     /// Mean IMU sample period (s), where the notches are placed.
     imu_period: f32,
-    dterm_lpf: Pt1v,
+    dterm_lpf: Lpf,
     /// Low-passed setpoint; the setpoint minus this is how fast the pilot
     /// is moving the sticks (I-term relax).
-    setpoint_lpf: Pt1v,
-    accel_lpf: Pt1v,
+    setpoint_lpf: Lpf,
+    accel_lpf: Lpf,
     /// Heavily filtered gyro: body motion without prop vibration.
-    gyro_slow: Pt1v,
+    gyro_slow: Lpf,
     prev_gyro: Vec3,
     /// Filtered angular acceleration (the D term's input), rad/s².
     ang_accel: Vec3,
@@ -382,30 +335,20 @@ impl State {
             cfg,
             now_us: 0,
             started: false,
-            cal: GyroCal {
-                done: false,
-                start_us: 0,
-                sum: Vec3::ZERO,
-                min: Vec3::new(f32::MAX, f32::MAX, f32::MAX),
-                max: Vec3::new(f32::MIN, f32::MIN, f32::MIN),
-                count: 0,
-                bias: Vec3::ZERO,
-                accel_sum: 0.0,
-                accel_1g: GRAVITY,
-            },
+            cal: GyroCal::new(0),
             last_imu_us: None,
             last_good_imu_us: None,
             last_raw: ([f32::NAN; 3], [f32::NAN; 3]),
             last_accepted_gyro: None,
             spike_run: 0,
-            gyro_lpf: Pt1v::default(),
+            gyro_lpf: Lpf::default(),
             rpm_filter: rpm::RpmFilter::default(),
             rpm_at_us: [None; 4],
             imu_period: 0.0,
-            dterm_lpf: Pt1v::default(),
-            setpoint_lpf: Pt1v::default(),
-            accel_lpf: Pt1v::default(),
-            gyro_slow: Pt1v::default(),
+            dterm_lpf: Lpf::default(),
+            setpoint_lpf: Lpf::default(),
+            accel_lpf: Lpf::default(),
+            gyro_slow: Lpf::default(),
             prev_gyro: Vec3::ZERO,
             ang_accel: Vec3::ZERO,
             gyro_saturated: false,
@@ -478,7 +421,7 @@ impl State {
             failsafe: self.failsafe,
             calibrated: self.cal.done,
             attitude: self.attitude,
-            gyro: self.gyro_lpf.get(),
+            gyro: self.gyro_lpf.y,
             rate_setpoint: self.setpoint,
             throttle: self.throttle_out,
             throttle_demand: if self.armed { self.throttle_demand } else { 0.0 },
@@ -518,7 +461,7 @@ impl State {
         if !self.cal.done {
             b |= ArmBlockers::CALIBRATING;
         }
-        if self.rc.throttle > 0.05 {
+        if self.rc.throttle > THROTTLE_LOW {
             b |= ArmBlockers::THROTTLE;
         }
         if self.rc_lost() {
@@ -558,28 +501,31 @@ pub fn step(mut s: State, event: &Event) -> (State, Effects) {
         // overtake them by a fraction of a millisecond; only a larger step
         // back is a glitching timer worth reporting.
         if s.now_us - event.t_us > 1_000 {
-            push(&mut fx, Effect::Notice(Notice::ClockWentBackwards));
+            fx.push(Effect::Notice(Notice::ClockWentBackwards));
         }
     } else {
         s.now_us = event.t_us;
     }
 
     match event.kind {
-        EventKind::Imu { gyro, accel } => on_imu(&mut s, gyro, accel, &mut fx),
+        EventKind::Imu { gyro, accel } => imu::on_imu(&mut s, gyro, accel, &mut fx),
         EventKind::Rc { channels } => on_rc(&mut s, &channels, &mut fx),
-        EventKind::Battery { volts, amps: _ } => on_battery(&mut s, volts, &mut fx),
-        EventKind::MotorTelemetry { erpm } => on_telemetry(&mut s, &erpm, &mut fx),
+        EventKind::Battery { volts, amps: _ } => health::on_battery(&mut s, volts, &mut fx),
+        EventKind::MotorTelemetry { erpm } => {
+            imu::on_erpm(&mut s, &erpm);
+            health::check_motors(&mut s, &erpm, &mut fx);
+        }
         EventKind::Tick => {
             // ESCs need a steady command stream; if IMU samples (which
             // normally drive the motors) are late, repeat the last command
             // until the IMU timeout decides.
             if s.armed && s.last_imu_us.is_none_or(|t| s.now_us.saturating_sub(t) >= 1_000) {
-                push(&mut fx, Effect::Motors(s.motors));
+                fx.push(Effect::Motors(s.motors));
             }
         }
         EventKind::Command(Command::RebootToBootloader) => {
             if !s.armed {
-                push(&mut fx, Effect::RebootToBootloader);
+                fx.push(Effect::RebootToBootloader);
             }
         }
     }
@@ -588,12 +534,25 @@ pub fn step(mut s: State, event: &Event) -> (State, Effects) {
     (s, fx.list)
 }
 
-fn push(fx: &mut Out, e: Effect) {
-    // Capacity is sized for the worst case; dropping a notice is preferable
-    // to panicking in flight if that ever proves wrong, but it is counted
-    // (`Status::effects_dropped`) so tests can tell.
-    if fx.list.push(e).is_err() {
-        fx.dropped += 1;
+impl Out {
+    fn push(&mut self, e: Effect) {
+        // Capacity is sized for the worst case; dropping a notice is
+        // preferable to panicking in flight if that ever proves wrong, but
+        // it is counted (`Status::effects_dropped`) so tests can tell.
+        if self.list.push(e).is_err() {
+            self.dropped += 1;
+        }
+    }
+}
+
+/// How long `on` has held without a break (µs), timing it in `since`:
+/// the debounce behind every "for this long" check.
+fn held_for(since: &mut Option<u64>, on: bool, now: u64) -> u64 {
+    if on {
+        now - *since.get_or_insert(now)
+    } else {
+        *since = None;
+        0
     }
 }
 
@@ -608,570 +567,8 @@ fn disarm(s: &mut State, reason: DisarmReason, fx: &mut Out) {
     s.motors = [DSHOT_STOP; 4];
     s.motor_frac = [0.0; 4];
     s.throttle_out = 0.0;
-    push(fx, Effect::Motors(s.motors));
-    push(fx, Effect::Notice(Notice::Disarmed(reason)));
-}
-
-fn align(a: ImuAlignment, v: Vec3) -> Vec3 {
-    // Sensor axes rotated clockwise (seen from above, about body z down).
-    match a {
-        ImuAlignment::Cw0 => v,
-        ImuAlignment::Cw90 => Vec3::new(-v.y, v.x, v.z),
-        ImuAlignment::Cw180 => Vec3::new(-v.x, -v.y, v.z),
-        ImuAlignment::Cw270 => Vec3::new(v.y, -v.x, v.z),
-    }
-}
-
-fn on_imu(s: &mut State, gyro: [f32; 3], accel: [f32; 3], fx: &mut Out) {
-    let now = s.now_us;
-    let g_raw = Vec3::from_array(gyro);
-    let a_raw = Vec3::from_array(accel);
-    let in_range = g_raw.is_finite()
-        && a_raw.is_finite()
-        && g_raw.max_abs() <= s.cfg.gyro_range * 1.5
-        && a_raw.max_abs() <= s.cfg.accel_range * 1.5;
-    // A quad cannot change its rate by more than about 1 rad/s between
-    // samples (torque / inertia), plus a few rad/s of prop vibration. A
-    // bigger jump is an SPI glitch or EMI spike. Rejecting it keeps it out of
-    // the attitude estimate; after a few rejects in a row the sensor is
-    // believed again, so a real step cannot lock it out.
-    let spike = in_range
-        && s.spike_run < 4
-        && s.last_accepted_gyro.is_some_and(|p| (g_raw - p).max_abs() > s.cfg.gyro_spike);
-    if spike {
-        s.spike_run += 1;
-    } else if in_range {
-        s.spike_run = 0;
-        s.last_accepted_gyro = Some(g_raw);
-    }
-    let valid = in_range && !spike;
-    let dt_us = s.last_imu_us.map_or(0, |t| now.saturating_sub(t));
-    s.last_imu_us = Some(now);
-    if !valid {
-        push(fx, Effect::Notice(Notice::ImuSampleRejected));
-        if s.armed {
-            // Keep the ESCs fed with the last command until the IMU timeout.
-            push(fx, Effect::Motors(s.motors));
-        }
-        return;
-    }
-    let gap = s.last_good_imu_us.is_none_or(|t| now.saturating_sub(t) > s.cfg.imu_timeout_us);
-    // Sensor noise makes consecutive real samples differ; an exact repeat is
-    // a hung sensor or bus. Keep flying on it, but it does not count as
-    // fresh data, so a hang longer than the IMU timeout stops the motors.
-    if (gyro, accel) != s.last_raw {
-        s.last_good_imu_us = Some(now);
-    }
-    s.last_raw = (gyro, accel);
-
-    let saturated = g_raw.max_abs() >= s.cfg.gyro_range * 0.97;
-    if saturated && !s.gyro_saturated {
-        push(fx, Effect::Notice(Notice::GyroSaturated));
-    }
-    if s.gyro_saturated && !saturated {
-        // The attitude estimate integrated clipped rates; lean on the
-        // accelerometer until it has re-converged.
-        s.fast_converge_until_us = now + 1_500_000;
-        s.recovering_until_us = now + 5_000_000;
-    }
-    s.gyro_saturated = saturated;
-
-    let g = align(s.cfg.imu_alignment, g_raw);
-    let a = align(s.cfg.imu_alignment, a_raw);
-    // Nominal sample spacing is 125..500 µs; clamp so one late or early
-    // sample cannot blow up the integrators or the derivative.
-    let reset_dynamics = gap || dt_us == 0 || dt_us > 5_000;
-    let dt = (dt_us as f32 * 1e-6).clamp(50e-6, 2e-3);
-
-    if !s.cal.done {
-        calibrate(s, g, a, fx);
-    }
-    let g = g - s.cal.bias;
-    let gyro_f = if reset_dynamics {
-        s.rpm_filter.reset(g);
-        s.gyro_lpf.reset(g);
-        g
-    } else {
-        s.imu_period = if s.imu_period == 0.0 { dt } else { s.imu_period + (dt - s.imu_period) * 0.01 };
-        // A motor whose eRPM stopped coming loses its notches.
-        for i in 0..4 {
-            if s.rpm_at_us[i].is_some_and(|t| now.saturating_sub(t) > RPM_STALE_US) {
-                s.rpm_at_us[i] = None;
-                s.rpm_filter.set_motor(i, None, 0.0, 0, 0.0, 0.0);
-            }
-        }
-        let rpm_on = s.cfg.rpm_filter_harmonics > 0 && s.rpm_at_us.iter().all(Option::is_some);
-        let hz = if rpm_on { s.cfg.gyro_lpf_rpm_hz } else { s.cfg.gyro_lpf_hz };
-        let notched = s.rpm_filter.apply(g);
-        s.gyro_lpf.update(notched, hz, dt)
-    };
-    let accel_f = if reset_dynamics {
-        s.accel_lpf.reset(a);
-        s.gyro_slow.reset(g);
-        a
-    } else {
-        s.gyro_slow.update(g, 10.0, dt);
-        s.accel_lpf.update(a, 30.0, dt)
-    };
-
-    estimate_attitude(s, g, accel_f, dt);
-    if s.armed {
-        control(s, gyro_f, accel_f, dt, reset_dynamics, fx);
-    } else {
-        s.prev_gyro = gyro_f;
-        s.dterm_lpf.reset(Vec3::ZERO);
-        push(fx, Effect::Motors([DSHOT_STOP; 4]));
-    }
-}
-
-fn calibrate(s: &mut State, g: Vec3, a: Vec3, fx: &mut Out) {
-    let c = &mut s.cal;
-    c.sum += g;
-    c.accel_sum += a.norm();
-    c.count += 1;
-    c.min = Vec3::new(c.min.x.min(g.x), c.min.y.min(g.y), c.min.z.min(g.z));
-    c.max = Vec3::new(c.max.x.max(g.x), c.max.y.max(g.y), c.max.z.max(g.z));
-    let spread = (c.max - c.min).max_abs();
-    if spread > s.cfg.gyro_cal_motion * 2.0 {
-        // Someone is moving the quad: start over.
-        *c = GyroCal { start_us: s.now_us, ..State::new(s.cfg).cal };
-        return;
-    }
-    if s.now_us.saturating_sub(c.start_us) >= s.cfg.gyro_cal_us && c.count >= 100 {
-        c.bias = c.sum * (1.0 / c.count as f32);
-        c.accel_1g = c.accel_sum / c.count as f32;
-        c.done = true;
-        s.fast_converge_until_us = s.now_us + 1_000_000;
-        push(fx, Effect::Notice(Notice::GyroCalibrated));
-    }
-}
-
-/// Attitude reset on the ground (as in Betaflight): disarmed and still for
-/// this long (µs), the estimate snaps to the accelerometer for
-/// `GROUND_RESET_US`. Any movement starts it over, so righting a crashed
-/// quad by hand or with turtle mode resets it again.
-const GROUND_RESET_QUIET_US: u64 = 250_000;
-const GROUND_RESET_US: u64 = 500_000;
-
-/// Mahony complementary filter.
-fn estimate_attitude(s: &mut State, gyro: Vec3, accel: Vec3, dt: f32) {
-    let a_norm = accel.norm();
-    let up_meas = accel * (1.0 / a_norm.max(1e-6));
-    // Specific force is only a gravity reference when the quad is not
-    // accelerating; trust it less the further it is from 1 g.
-    let dev = (a_norm / GRAVITY - 1.0).abs();
-    // In flight the accelerometer reads mostly thrust, which looks level
-    // whatever the tilt while the quad speeds up or slows down, so a crash
-    // can leave the estimate off for seconds. Sitting still on the ground
-    // it reads pure gravity: trust it fully then.
-    let still = s.cal.done && !s.armed && gyro.max_abs() < 15f32.to_radians() && dev < 0.2;
-    let still_for = if still { s.now_us - *s.still_since_us.get_or_insert(s.now_us) } else { s.still_since_us = None; 0 };
-    let ground_reset = (GROUND_RESET_QUIET_US..GROUND_RESET_QUIET_US + GROUND_RESET_US).contains(&still_for);
-    let fast = s.now_us < s.fast_converge_until_us || !s.cal.done || ground_reset;
-    // After calibration or gyro saturation the estimate may be far off, so
-    // any roughly-1 g reading beats the gyro integral.
-    let band = if fast { 0.5 } else { 0.1 };
-    let weight = (1.0 - dev / band).clamp(0.0, 1.0);
-    let kp: f32 = if ground_reset {
-        25.0
-    } else if fast {
-        6.0
-    } else if s.armed {
-        0.5
-    } else {
-        2.0
-    };
-    let mut omega = gyro;
-    if weight > 0.0 && !s.gyro_saturated {
-        let up_est = s.attitude.inverse_rotate(Vec3::new(0.0, 0.0, -1.0));
-        let err = up_meas.cross(up_est);
-        // After a saturation the fast window often passes while the pilot
-        // punches out and the accelerometer reads thrust, far from 1 g.
-        // For a few seconds more, a clean 1 g reading more than 10 degrees
-        // from the estimate while the quad hardly turns is the estimate's
-        // fault: pull at the fast gain. Only then: a punch at 1.3 g, or a
-        // fast roll at 1 g, still reads level while tilted, and believing
-        // that fast tips angle mode over.
-        let recovering = s.now_us < s.recovering_until_us && dev < 0.1 && gyro.norm() < 1.0 && err.norm() > 0.17;
-        let kp = if recovering { kp.max(6.0) } else { kp };
-        if s.cal.done && !fast && !recovering {
-            s.est_integral = s.est_integral + err * (0.3 * weight * dt);
-            // Residual gyro bias from warm-up drift after calibration.
-            let lim = 0.1;
-            s.est_integral = Vec3::new(
-                s.est_integral.x.clamp(-lim, lim),
-                s.est_integral.y.clamp(-lim, lim),
-                s.est_integral.z.clamp(-lim, lim),
-            );
-        }
-        omega = omega + err * (kp * weight) + s.est_integral;
-    }
-    s.attitude = s.attitude.integrate(omega, dt);
-    if !s.attitude.is_finite() {
-        s.attitude = Quat::IDENTITY;
-    }
-}
-
-/// Motor mix (roll, pitch, yaw per motor) for QuadX in Betaflight motor
-/// order, props out: M1 rear-right, M2 front-right, M3 rear-left, M4
-/// front-left. FRD axes: positive roll is right side down, positive pitch
-/// nose up, positive yaw nose right.
-const MIX: [[f32; 3]; 4] = [
-    [-1.0, -1.0, 1.0],
-    [-1.0, 1.0, -1.0],
-    [1.0, -1.0, -1.0],
-    [1.0, 1.0, 1.0],
-];
-
-fn rate_curve(r: &Rates, stick: f32) -> f32 {
-    let x = stick.clamp(-1.0, 1.0);
-    let ax = x.abs();
-    let x = x * ax * ax * ax * r.expo + x * (1.0 - r.expo);
-    let super_factor = 1.0 / (1.0 - ax * r.super_rate).clamp(0.01, 1.0);
-    let dps = (200.0 * r.rc_rate * x * super_factor).clamp(-1998.0, 1998.0);
-    dps.to_radians()
-}
-
-/// Motor speed for a throttle at the pack's voltage, relative to the same
-/// throttle at the sag-compensation reference voltage: 1 while compensation
-/// keeps up, less below about 3.1 V a cell where it is capped at 1.25x (a
-/// sagging pack then needs more throttle to hover), more above the
-/// reference (a fresh pack needs less).
-fn sag_ratio(s: &State) -> f32 {
-    let cfg = &s.cfg;
-    match (cfg.vbat_sag_comp, s.battery_volts) {
-        (true, Some(v)) if v > 0.5 => {
-            let vref = cfg.vbat_ref_cell * cfg.battery_cells as f32;
-            (vref / v).clamp(1.0, 1.25) * v / vref
-        }
-        _ => 1.0,
-    }
-}
-
-fn control(s: &mut State, gyro: Vec3, accel: Vec3, dt: f32, reset: bool, fx: &mut Out) {
-    let cfg = s.cfg;
-    // Vertical motion from the accelerometer, against what it read for 1 g
-    // on the ground. In normal flight the integral leaks, forgetting steady
-    // motion over a few seconds (without a barometer a steady climb looks
-    // like hover) but showing climbs and descents as they start and end.
-    // It reads g * (1 - cos e) too low for an attitude estimate off by e,
-    // which in hard maneuvering adds up to a m/s or two, but the leak
-    // forgets that within a few seconds. Failsafe keeps the estimate it had
-    // when the link was lost (the quad is often already climbing or
-    // sinking; starting from zero would read that error for the whole
-    // landing) and integrates without leaking.
-    let down_accel = s.attitude.rotate(accel).z + s.cal.accel_1g;
-    let leak = if s.failsafe == FailsafeStage::None { s.vz_est / 4.0 } else { 0.0 };
-    s.vz_est += (down_accel - leak) * dt;
-    if s.failsafe == FailsafeStage::Hold && s.hold_vz_mark.is_none() && s.now_us.saturating_sub(s.failsafe_since_us) >= 500_000 {
-        s.hold_vz_mark = Some(s.vz_est);
-    }
-    let (roll, pitch, yaw, throttle) = match s.failsafe {
-        FailsafeStage::None => (s.rc.roll, s.rc.pitch, s.rc.yaw, s.rc.throttle),
-        // Hold altitude at the learned hover throttle, then sink at about
-        // 1-2 m/s at 96% of it (thrust grows with throttle squared, so about
-        // 92% of hover thrust). The hold also measures how far the learned
-        // hover throttle is off (see housekeeping). During the landing a
-        // fast sink brakes; the integrated accelerometer drifts (vibration),
-        // so the brake's ceiling falls from 115% of hover to hover itself
-        // over the first 4 s: a drifting estimate can then at most hold the
-        // quad, and the trim below still takes it down. Below hover nothing
-        // could stop a long descent speeding up.
-        // Throttle at the bottom when the link went means the quad is on the
-        // ground (or the pilot cut it): never spin up from there.
-        FailsafeStage::Hold if s.throttle_at_loss < 0.05 => (0.0, 0.0, 0.0, 0.0),
-        FailsafeStage::Hold => (0.0, 0.0, 0.0, s.hover_throttle / sag_ratio(s)),
-        FailsafeStage::Landing => {
-            let landing_s = s.now_us.saturating_sub(s.failsafe_since_us) as f32 * 1e-6;
-            let ceiling = (1.15 - 0.04 * landing_s).max(1.0);
-            if s.now_us.saturating_sub(s.landing_vz_ref.0) >= 250_000 {
-                s.landing_accel = (s.vz_est - s.landing_vz_ref.1) / 0.25;
-                s.landing_vz_ref = (s.now_us, s.vz_est);
-            }
-            // Not sinking, or not speeding up although throttle is being
-            // taken off: take more off, steadily. In the air that soon
-            // starts a descent (a learned hover throttle far too high cannot
-            // keep it climbing) and then speeds it up, which stops the trim;
-            // on the ground nothing changes, and once thrust is well below
-            // hover the housekeeping calls it landed. The speed estimate
-            // itself drifts by a m/s or more over a long landing, so these
-            // tests use only how it changes.
-            if s.landing_trim == 0.0 {
-                s.landing_trim_vz = s.vz_est;
-            }
-            let unmoved = s.landing_accel.abs() < 0.6 && s.vz_est - s.landing_trim_vz < 0.5;
-            s.landing_trim = if s.vz_est < 0.25 || unmoved {
-                (s.landing_trim + 0.25 * dt).min(0.35)
-            } else {
-                (s.landing_trim - 2.0 * dt).max(0.0)
-            };
-            let brake = 0.15 * (s.vz_est - 1.2).max(0.0);
-            // A descent still speeding up gets up to 8% over the ceiling.
-            // This brakes on acceleration over a quarter second, which the
-            // estimate's slow drift cannot fake, so it cannot hold the quad
-            // up; it stops the trim's probes from adding up, and a learned
-            // hover throttle that is too low from running away. Only upright:
-            // a tumbling quad's estimate is meaningless.
-            let speeding = if s.attitude.tilt() < 0.5 { (0.04 * (s.landing_accel - 0.3)).clamp(0.0, 0.08) } else { 0.0 };
-            let k = (0.96 + brake).min(ceiling) + speeding - s.landing_trim;
-            (0.0, 0.0, 0.0, s.hover_throttle * k / sag_ratio(s))
-        }
-    };
-    s.throttle_demand = throttle;
-    if throttle > cfg.airmode_throttle {
-        s.airmode_active = true;
-    }
-    // Over a second or two of level flight the pilot's average throttle is
-    // the one that holds altitude. Thrust grows with throttle squared and
-    // only its vertical part lifts, so scale by sqrt(cos(tilt)). A climbing
-    // or sinking quad would teach the wrong value (and the failsafe would
-    // then climb instead of land), so learning pauses while moving up or
-    // down.
-    let tilt = s.attitude.tilt();
-    let level_flight = s.vz_est.abs() < 0.5;
-    // In reference-voltage terms, so the failsafe flies the same hover on a
-    // sagging pack.
-    let at_ref = sag_ratio(s);
-    if s.failsafe == FailsafeStage::None && s.airmode_active && level_flight && tilt < 0.5 && (0.1..0.95).contains(&throttle) {
-        let level = throttle * at_ref * libm::sqrtf(libm::cosf(tilt));
-        s.hover_throttle += (level - s.hover_throttle) * (dt / 1.5);
-    }
-
-    let yaw_rate = rate_curve(&cfg.rates[2], yaw);
-    let setpoint = match s.effective_mode() {
-        FlightMode::Acro => Vec3::new(
-            rate_curve(&cfg.rates[0], roll),
-            // Stick forward pitches the nose down.
-            -rate_curve(&cfg.rates[1], pitch),
-            yaw_rate,
-        ),
-        FlightMode::Angle => {
-            let target = up_in_body(roll * cfg.angle_limit, -pitch * cfg.angle_limit);
-            let up = s.attitude.inverse_rotate(Vec3::new(0.0, 0.0, -1.0));
-            let e = tilt_error(up, target) * cfg.angle_p;
-            let lim = cfg.angle_rate_limit;
-            Vec3::new(e.x.clamp(-lim, lim), e.y.clamp(-lim, lim), yaw_rate)
-        }
-    };
-
-    if reset {
-        s.prev_gyro = gyro;
-        s.dterm_lpf.reset(Vec3::ZERO);
-    }
-    let d_gyro = (gyro - s.prev_gyro) * (1.0 / dt);
-    s.prev_gyro = gyro;
-    let d_gyro = s.dterm_lpf.update(d_gyro, cfg.dterm_lpf_hz, dt);
-    s.ang_accel = d_gyro;
-
-    let err = setpoint - gyro;
-    // No I-term at zero throttle: resting on the ground (or a wall) the
-    // frame cannot move, the error never closes, and an integrator would
-    // wind up and push the motors through airmode.
-    let integrate = s.airmode_active && throttle > 0.05 && !s.mixer_saturated && !s.gyro_saturated && !reset;
-    if !s.airmode_active {
-        // On the ground before takeoff: no I-term windup.
-        s.integral = Vec3::ZERO;
-    }
-    // I-term relax (as in Betaflight): while the roll or pitch setpoint is
-    // moving fast the error is the frame catching up, not a steady offset;
-    // integrating it overshoots the stick by half again and then unwinds
-    // for a couple of hundred ms.
-    let sp_moving = setpoint - s.setpoint_lpf.update(setpoint, 15.0, dt);
-    let relax = |x: f32| (1.0 - x.abs() / 40f32.to_radians()).clamp(0.0, 1.0);
-    let relax = [relax(sp_moving.x), relax(sp_moving.y), 1.0];
-    let e = [err.x, err.y, err.z];
-    let d = [d_gyro.x, d_gyro.y, d_gyro.z];
-    let sp = [setpoint.x, setpoint.y, setpoint.z];
-    let mut integral = [s.integral.x, s.integral.y, s.integral.z];
-    let mut out = [0.0f32; 3];
-    for i in 0..3 {
-        let k = cfg.pid[i];
-        if integrate {
-            integral[i] = (integral[i] + k.i * e[i] * relax[i] * dt).clamp(-cfg.iterm_limit, cfg.iterm_limit);
-        }
-        let lim = if i == 2 { cfg.pid_sum_limit * 0.7 } else { cfg.pid_sum_limit };
-        out[i] = (k.p * e[i] + integral[i] - k.d * d[i] + k.ff * sp[i]).clamp(-lim, lim);
-    }
-    s.integral = Vec3::from_array(integral);
-    s.setpoint = setpoint;
-    s.last_pid = Vec3::from_array(out);
-
-    let mut mix = [0.0f32; 4];
-    for (m, row) in mix.iter_mut().zip(MIX) {
-        *m = row[0] * out[0] + row[1] * out[1] + row[2] * out[2];
-    }
-    let lo = mix.iter().copied().fold(f32::MAX, f32::min);
-    let hi = mix.iter().copied().fold(f32::MIN, f32::max);
-    let span = hi - lo;
-    s.mixer_saturated = span > 1.0;
-    if span > 1.0 {
-        for m in &mut mix {
-            *m /= span;
-        }
-    }
-    let (lo, hi) = (lo / span.max(1.0), hi / span.max(1.0));
-    let mut thr = throttle.clamp(0.0, 1.0);
-    let comp = match (cfg.vbat_sag_comp, s.battery_volts) {
-        (true, Some(v)) if v > 0.5 => {
-            (cfg.vbat_ref_cell * cfg.battery_cells as f32 / v).clamp(1.0, 1.25)
-        }
-        _ => 1.0,
-    };
-    thr = (thr * comp).min(1.0);
-    if s.airmode_active {
-        // Airmode: shift throttle so every motor stays in range and the
-        // attitude correction is never clipped.
-        thr = thr.clamp(-lo, (1.0 - hi).max(-lo));
-    }
-    s.throttle_out = thr;
-    for i in 0..4 {
-        let m = (thr + mix[i]).clamp(0.0, 1.0);
-        let f = cfg.motor_idle + (1.0 - cfg.motor_idle) * m;
-        s.motor_frac[i] = f;
-        let v = DSHOT_MIN as f32 + roundf(f * (DSHOT_MAX - DSHOT_MIN) as f32);
-        s.motors[i] = (v as u16).clamp(DSHOT_MIN, DSHOT_MAX);
-    }
-
-    runaway_and_crash(s, gyro, accel, throttle, dt, fx);
-    if s.armed {
-        push(fx, Effect::Motors(s.motors));
-    }
-}
-
-/// How long a frame must stay unblocked before its blocked time starts
-/// over (µs).
-const CRASH_BLOCKED_GAP_US: u64 = 500_000;
-
-/// A frame that tipped over without the vertical-speed estimate showing a
-/// fall faster than this (m/s) rolled over on the ground.
-const TIPPED_FALL_MAX: f32 = 2.0;
-
-/// Climb (m/s, from `vz_est`) that shows an upright quad left the ground.
-const LIFTOFF_CLIMB: f32 = 0.5;
-
-fn runaway_and_crash(s: &mut State, gyro: Vec3, accel: Vec3, throttle: f32, dt: f32, fx: &mut Out) {
-    let cfg = s.cfg;
-    let now = s.now_us;
-    if s.runaway_active {
-        let lim = cfg.pid_sum_limit * cfg.runaway_pid_frac;
-        let pid_high = s.last_pid.x.abs() >= lim || s.last_pid.y.abs() >= lim;
-        let spinning = gyro.norm() > cfg.runaway_gyro;
-        // A pilot's stick reversal saturates the PIDs while the frame still
-        // turns the old way, but it slows down in the direction pushed. A
-        // build that cannot fly speeds up away from the push. With the
-        // sticks moved, only that counts; with them centred, any saturated
-        // spin does (a tumble on the ground need not speed up).
-        let flown = s.rc.roll.abs().max(s.rc.pitch.abs()).max(s.rc.yaw.abs()) > 0.15;
-        let p = s.last_pid;
-        let pushed_back = s.ang_accel.x * p.x + s.ang_accel.y * p.y < 0.0;
-        if pid_high && spinning && (pushed_back || !flown) {
-            let since = *s.runaway_since_us.get_or_insert(now);
-            if now - since >= cfg.runaway_us {
-                disarm(s, DisarmReason::RunawayTakeoff, fx);
-                return;
-            }
-        } else {
-            s.runaway_since_us = None;
-            // Calm, level flight shows the build works, and so does a
-            // pilot flying it with the sticks (as Betaflight counts it),
-            // as long as it stays the right way up with the PIDs in range.
-            // Throttle alone does not: a quad that cannot fly may sit on
-            // the ground at part throttle until a gust tips it, and then
-            // tumble about on it while the pilot works the sticks. Sitting
-            // still and upright is calm too, so none of it counts until the
-            // quad has lifted off: climbed upright, which the ground cannot
-            // fake.
-            let upright = s.attitude.tilt() < 30f32.to_radians();
-            if upright && -s.vz_est > LIFTOFF_CLIMB {
-                s.lifted_off = true;
-            }
-            if throttle > cfg.airmode_throttle && s.lifted_off && upright && !pid_high && (!spinning || flown) {
-                s.runaway_ok_us += (dt * 1e6) as u64;
-                if s.runaway_ok_us >= cfg.runaway_deactivate_us {
-                    s.runaway_active = false;
-                    s.flight_proven = true;
-                }
-            }
-        }
-    }
-
-    // Crashed: tilted far over and not righting itself, in one of two ways.
-    // Stop the motors before they burn out or scoot the quad along the floor.
-    //
-    // Only rotation that changes the tilt counts as motion: on the ground
-    // nothing stops a quad spinning flat (around the vertical, whichever
-    // body axis that is), and that never rights it.
-    //
-    // Blocked: the sticks (or angle mode) demand a fast roll or pitch and
-    // the frame does not follow. In the air it would within milliseconds,
-    // so something (the ground, a wall, a tree) holds it.
-    //
-    // Lying: still and, by the accelerometer, propped up by something solid
-    // (about 1 g pushing against its side or canopy), shortly after an
-    // impact. This is the hands-off case, so it must not catch acro. An
-    // inverted plunge at terminal speed reads exactly like the ground (drag
-    // balances gravity), at any throttle and for as long as the fall lasts,
-    // but it never hit anything: getting from flight to resting on the
-    // ground takes a jolt that thrust cannot produce.
-    let tilt = s.attitude.tilt();
-    let slow = s.gyro_slow.get();
-    let up = up_in_body_frame(s.attitude);
-    let rp_motion = (slow - up * slow.dot(up)).norm();
-    let a = accel.norm();
-    // An impact is a jolt no flight can produce. Thrust is at most
-    // thrust/weight (about 1 / hover throttle squared) in g along the thrust
-    // axis; drag reaches thrust/weight + 1 g after a power dive (cutting
-    // the throttle at the bottom of an inverted dive brakes at that), and
-    // adds to thrust along the thrust axis when pulling out of one.
-    let h = s.hover_throttle.clamp(0.15, 0.9);
-    let tw = 1.0 / (h * h);
-    let margin = cfg.crash_impact_margin;
-    let along_thrust = -accel.z;
-    let across = Vec3::new(accel.x, accel.y, accel.z.max(0.0)).norm();
-    let jolt = across > (tw + 1.0) * GRAVITY * margin || along_thrust > (2.0 * tw + 1.0) * GRAVITY * margin;
-    if a > cfg.crash_impact && jolt {
-        s.last_impact_us = Some(now);
-    }
-    let propped = (0.7 * GRAVITY..1.3 * GRAVITY).contains(&a) && -accel.z / a < 0.64;
-    // Spinning flat on the ground with the thrust and friction pulling
-    // the attitude estimate a few degrees off, part of the spin reads as
-    // roll and pitch; allow for about 15 degrees of that.
-    let lying = tilt > 60f32.to_radians() && rp_motion < 0.5 + 0.25 * slow.norm() && propped;
-    // Blocked means not turning the way the sticks ask, whatever else it
-    // does: a corkscrew dive rolls about the vertical, like a quad spinning
-    // flat, but it follows the stick.
-    let demand = Vec3::new(s.setpoint.x, s.setpoint.y, 0.0);
-    let wants = demand.norm();
-    let blocked = tilt > 60f32.to_radians() && wants > 2.0 && slow.dot(demand) < wants;
-    // Each condition times itself: a pilot rolling out of a slow inverted
-    // dive turns `lying` into `blocked` for a moment, and must get the full
-    // blocked time for the frame to follow.
-    let lying_for = if lying { now - *s.lying_since_us.get_or_insert(now) } else { s.lying_since_us = None; 0 };
-    // Blocked adds up: a pilot slamming the sticks from side to side rocks
-    // a stuck frame towards each new demand for a moment, which is not
-    // getting free. Only righting itself or half a second unblocked is.
-    if blocked {
-        s.blocked_us += (dt * 1e6) as u64;
-        s.blocked_last_us = now;
-    } else if tilt <= 60f32.to_radians() || now.saturating_sub(s.blocked_last_us) >= CRASH_BLOCKED_GAP_US {
-        s.blocked_us = 0;
-    }
-    let blocked_for = if blocked { s.blocked_us } else { 0 };
-    // Or it rolled over on the ground: an inverted plunge only reads like
-    // lying once drag holds it up, so it must have fallen several m/s
-    // first, which the vertical-speed estimate sees. Tipping over where it
-    // stood needs no jolt (a pilot flipping a quad that cannot take off).
-    s.tipped_fall = if tilt > 60f32.to_radians() { s.tipped_fall.max(s.vz_est) } else { 0.0 };
-    let rolled_over = s.tipped_fall < TIPPED_FALL_MAX;
-    let hit = s.lying_since_us.is_some_and(|l| rolled_over || s.last_impact_us.is_some_and(|t| t + cfg.crash_impact_window_us >= l));
-    if (hit && lying_for >= cfg.crash_still_us) || blocked_for >= cfg.crash_blocked_us {
-        disarm(s, DisarmReason::Crash, fx);
-    }
-}
-
-/// The world's up direction in the body frame.
-fn up_in_body_frame(q: Quat) -> Vec3 {
-    q.inverse_rotate(Vec3::new(0.0, 0.0, -1.0))
+    fx.push(Effect::Motors(s.motors));
+    fx.push(Effect::Notice(Notice::Disarmed(reason)));
 }
 
 fn stick(us: u16) -> f32 {
@@ -1182,7 +579,7 @@ fn on_rc(s: &mut State, channels: &[u16; RC_CHANNELS], fx: &mut Out) {
     // A frame with any channel outside the plausible pulse range is
     // corrupted; drop it rather than act on it.
     if channels.iter().any(|&c| !(880..=2120).contains(&c)) {
-        push(fx, Effect::Notice(Notice::RcFrameRejected));
+        fx.push(Effect::Notice(Notice::RcFrameRejected));
         return;
     }
     let now = s.now_us;
@@ -1199,7 +596,7 @@ fn on_rc(s: &mut State, channels: &[u16; RC_CHANNELS], fx: &mut Out) {
     let mode = if channels[ch::MODE] > 1700 { FlightMode::Acro } else { FlightMode::Angle };
     if mode != s.rc.mode {
         s.rc.mode = mode;
-        push(fx, Effect::Notice(Notice::ModeChanged(mode)));
+        fx.push(Effect::Notice(Notice::ModeChanged(mode)));
     }
 
     let gesture = channels[ch::ARM] < 1300
@@ -1207,14 +604,9 @@ fn on_rc(s: &mut State, channels: &[u16; RC_CHANNELS], fx: &mut Out) {
         && channels[ch::YAW] < 1100
         && channels[ch::PITCH] < 1100
         && channels[ch::ROLL] > 1900;
-    if gesture && !s.armed {
-        let since = *s.boot_gesture_since_us.get_or_insert(now);
-        if now - since >= 2_000_000 {
-            s.boot_gesture_since_us = None;
-            push(fx, Effect::RebootToBootloader);
-        }
-    } else {
+    if held_for(&mut s.boot_gesture_since_us, gesture && !s.armed, now) >= 2_000_000 {
         s.boot_gesture_since_us = None;
+        fx.push(Effect::RebootToBootloader);
     }
 
     let arm = channels[ch::ARM];
@@ -1247,147 +639,24 @@ fn on_rc(s: &mut State, channels: &[u16; RC_CHANNELS], fx: &mut Out) {
             // Spin up to idle now. Until the next IMU sample runs the
             // controller, the keep-alive tick repeats this command; left at
             // the disarmed zeros it would hold the motors stopped while armed.
-            let idle = DSHOT_MIN as f32 + roundf(s.cfg.motor_idle * (DSHOT_MAX - DSHOT_MIN) as f32);
-            s.motors = [(idle as u16).clamp(DSHOT_MIN, DSHOT_MAX); 4];
-            push(fx, Effect::Notice(Notice::Armed(s.rc.mode)));
-            push(fx, Effect::Motors(s.motors));
+            s.motors = [control::dshot(s.cfg.motor_idle); 4];
+            fx.push(Effect::Notice(Notice::Armed(s.rc.mode)));
+            fx.push(Effect::Motors(s.motors));
         } else {
-            push(fx, Effect::Notice(Notice::ArmingBlocked(blockers)));
+            fx.push(Effect::Notice(Notice::ArmingBlocked(blockers)));
         }
     }
 }
 
-fn on_battery(s: &mut State, volts: f32, fx: &mut Out) {
-    if !volts.is_finite() || volts < 0.0 {
-        return;
-    }
-    let v = match s.battery_volts {
-        // About 0.5 s time constant at the usual 50..100 Hz sample rate.
-        Some(prev) => prev + 0.05 * (volts - prev),
-        None => volts,
-    };
-    s.battery_volts = Some(v);
-    let cells = s.cfg.battery_cells as f32;
-    let per_cell = v / cells;
-    let hyst = 0.05;
-    let level = match s.battery_level {
-        BatteryLevel::Ok if per_cell < s.cfg.vbat_crit_cell => BatteryLevel::Critical,
-        BatteryLevel::Ok if per_cell < s.cfg.vbat_warn_cell => BatteryLevel::Warning,
-        BatteryLevel::Warning if per_cell < s.cfg.vbat_crit_cell => BatteryLevel::Critical,
-        BatteryLevel::Warning if per_cell > s.cfg.vbat_warn_cell + hyst => BatteryLevel::Ok,
-        BatteryLevel::Critical if per_cell > s.cfg.vbat_warn_cell + hyst => BatteryLevel::Ok,
-        BatteryLevel::Critical if per_cell > s.cfg.vbat_crit_cell + hyst => BatteryLevel::Warning,
-        l => l,
-    };
-    if level != s.battery_level {
-        s.battery_level = level;
-        push(fx, Effect::Notice(Notice::Battery(level)));
-    }
-}
-
-/// eRPM older than this no longer places a motor's notches (µs).
-const RPM_STALE_US: u64 = 20_000;
-
-fn on_telemetry(s: &mut State, erpm: &[Option<u32>; 4], fx: &mut Out) {
-    let cfg = s.cfg;
-    for (i, e) in erpm.iter().enumerate() {
-        let Some(e) = e else { continue };
-        s.rpm_at_us[i] = Some(s.now_us);
-        if s.imu_period > 0.0 {
-            let rotation_hz = *e as f32 / cfg.motor_pole_pairs / 60.0;
-            let harmonics = (cfg.rpm_filter_harmonics as usize).min(rpm::MAX_HARMONICS);
-            s.rpm_filter.set_motor(i, Some(rotation_hz), 1.0 / s.imu_period, harmonics, cfg.rpm_filter_q, cfg.rpm_filter_min_hz);
-        }
-    }
-    if !s.armed {
-        return;
-    }
-    let vcomp = s.battery_volts.map_or(1.0, |v| {
-        (v / (s.cfg.vbat_ref_cell * s.cfg.battery_cells as f32)).clamp(0.6, 1.2)
-    });
-    for i in 0..4 {
-        let Some(rpm) = erpm[i] else { continue };
-        let expected = s.motor_frac[i] * s.cfg.motor_max_erpm * vcomp;
-        let low = s.motor_frac[i] > 0.25 && (rpm as f32) < expected * s.cfg.motor_fault_frac;
-        if low {
-            let since = *s.motor_fault_since_us[i].get_or_insert(s.now_us);
-            if !s.motor_faults[i] && s.now_us - since >= s.cfg.motor_fault_us {
-                s.motor_faults[i] = true;
-                push(fx, Effect::Notice(Notice::MotorFault(i as u8)));
-            }
-        } else if (rpm as f32) >= expected * 0.6 || s.motor_frac[i] <= 0.25 {
-            s.motor_fault_since_us[i] = None;
-            if s.motor_faults[i] {
-                s.motor_faults[i] = false;
-                push(fx, Effect::Notice(Notice::MotorRecovered(i as u8)));
-            }
-        }
-    }
-}
-
-/// Timeouts and annunciators, run after every event.
+/// Timeouts, failsafe stages and annunciators, run after every event.
 fn housekeeping(s: &mut State, fx: &mut Out) {
     let now = s.now_us;
-    let cfg = s.cfg;
 
     if s.armed && s.imu_stale() {
         disarm(s, DisarmReason::ImuFailure, fx);
     }
 
-    let lost = s.rc_lost();
-    let recovered = !lost
-        && s.rc.last_valid_us.is_some()
-        && now.saturating_sub(s.rc.valid_since_us) >= cfg.failsafe_recovery_us;
-    match s.failsafe {
-        FailsafeStage::None if lost && s.armed => {
-            s.failsafe = FailsafeStage::Hold;
-            s.failsafe_since_us = now;
-            s.hold_vz_mark = None;
-            s.throttle_at_loss = s.rc.throttle;
-            push(fx, Effect::Notice(Notice::Failsafe(FailsafeStage::Hold)));
-        }
-        FailsafeStage::Hold | FailsafeStage::Landing if recovered => {
-            s.failsafe = FailsafeStage::None;
-            push(fx, Effect::Notice(Notice::FailsafeRecovered));
-            if !s.rc.arm_switch {
-                disarm(s, DisarmReason::Switch, fx);
-            }
-        }
-        FailsafeStage::Hold if now - s.failsafe_since_us >= cfg.failsafe_stage1_us => {
-            if !s.airmode_active || s.throttle_at_loss < 0.05 {
-                // Still on the ground: just stop.
-                disarm(s, DisarmReason::Failsafe, fx);
-            } else {
-                // The hold ran at the learned hover throttle: an upward
-                // acceleration a in its second half means thrust is a/g too
-                // high, so throttle is about a/2g too high.
-                if let Some(mark) = s.hold_vz_mark {
-                    let span = now.saturating_sub(s.failsafe_since_us + 500_000).max(100_000) as f32 * 1e-6;
-                    let down_accel = (s.vz_est - mark) / span;
-                    s.hover_throttle *= (1.0 + down_accel / (2.0 * GRAVITY)).clamp(0.85, 1.15);
-                }
-                s.failsafe = FailsafeStage::Landing;
-                s.failsafe_since_us = now;
-                // Keep the vertical speed the hold measured: the quad may
-                // already be sinking.
-                s.landing_trim = 0.0;
-                s.landing_vz_ref = (now, s.vz_est);
-                s.landing_accel = f32::MAX;
-                push(fx, Effect::Notice(Notice::Failsafe(FailsafeStage::Landing)));
-            }
-        }
-        FailsafeStage::Landing => {
-            // Touchdown: not accelerating with the throttle trimmed to about
-            // half of hover thrust, which in the air would drop the quad at
-            // 5 m/s². The accelerometer magnitude is no use here: with a
-            // bent prop it reads several g of vibration in flight.
-            let touchdown = s.landing_trim >= 0.3 && s.landing_accel.abs() < 0.6 && s.vz_est - s.landing_trim_vz < 0.5;
-            if touchdown || now - s.failsafe_since_us >= cfg.failsafe_landing_us {
-                disarm(s, DisarmReason::Failsafe, fx);
-            }
-        }
-        _ => {}
-    }
+    failsafe::advance(s, fx);
 
     // LED: solid when armed, slow blink when ready, fast blink otherwise.
     let led = if s.armed {
@@ -1398,7 +667,7 @@ fn housekeeping(s: &mut State, fx: &mut Out) {
     };
     if led != s.led {
         s.led = led;
-        push(fx, Effect::Led(led));
+        fx.push(Effect::Led(led));
     }
     let beeper = if s.failsafe != FailsafeStage::None {
         now % 400_000 < 200_000
@@ -1411,7 +680,7 @@ fn housekeeping(s: &mut State, fx: &mut Out) {
     };
     if beeper != s.beeper {
         s.beeper = beeper;
-        push(fx, Effect::Beeper(beeper));
+        fx.push(Effect::Beeper(beeper));
     }
 }
 
