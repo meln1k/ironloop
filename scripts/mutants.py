@@ -3,7 +3,9 @@
 
 Each mutant reintroduces a real flight-controller bug into the firmware
 core. The checks must catch every one of them; a mutant that survives
-means the workload or the properties miss a real-world case.
+means the workload or the properties miss a real-world case. The
+"monitor:" mutants instead break the checker (the simulator's monitor) in
+ways that once hid real firmware failures.
 
 Usage: scripts/mutants.py [seeds] [name filter]   (default 300; run from anywhere)
 
@@ -25,6 +27,7 @@ ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
 LIB = "crates/ironloop-fc/src/lib.rs"
 CFG = "crates/ironloop-fc/src/config.rs"
 MATH = "crates/ironloop-fc/src/math.rs"
+MON = "crates/ironloop-sim/src/monitor.rs"
 
 MIX_OK = """    [-1.0, -1.0, 1.0],
     [-1.0, 1.0, -1.0],
@@ -122,6 +125,24 @@ MUTANTS = {
     # Control quality.
     "rate curve 40% low": [(LIB, "let dps = (200.0 * r.rc_rate * x * super_factor)", "let dps = (120.0 * r.rc_rate * x * super_factor)")],
     "roll/pitch D ten times too high (oscillates)": [(CFG, "d: 0.000525, ff: 0.0 }", "d: 0.00525, ff: 0.0 }")],
+    # The checker itself: a monitor bug that hides real firmware failures.
+    "monitor: any fault during a link loss excuses the failsafe checks": [(
+        MON,
+        """            window.contains(&t)
+                && matches!(
+                    f.kind,
+                    FaultKind::Kick { .. }
+                        | FaultKind::Impact { .. }
+                        | FaultKind::MotorDesync { .. }
+                        | FaultKind::MotorDegraded { .. }
+                        | FaultKind::ImuDropout
+                        | FaultKind::ImuStuck
+                        | FaultKind::ImuGarbage { .. }
+                )
+        })""",
+        """            window.contains(&t) && !matches!(f.kind, FaultKind::RcLoss | FaultKind::WindShift { .. })
+        }) && Self::excusing_fault(sc, t)""",
+    )],
 }
 
 

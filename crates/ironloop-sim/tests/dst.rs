@@ -47,6 +47,17 @@ fn regression_seeds_hold_every_property() {
     }
 }
 
+/// Seed 1444 loses the link at altitude while the board drops 1% of events.
+/// The monitor once let that unrelated event drop switch the failsafe
+/// checks off, which hid a 2.6 m/s failsafe touchdown; the landing must be
+/// judged, and soft.
+#[test]
+fn failsafe_landing_is_judged_through_an_unrelated_fault() {
+    let r = run_seed(1444);
+    assert!(r.violations.is_empty(), "seed 1444 [{}]: {:?}", r.name, r.violations);
+    assert!(r.stats.live.get("failsafe_lands_softly").is_some_and(|&n| n > 0), "seed 1444: touchdown not judged: {:?}", r.stats.live);
+}
+
 #[test]
 fn nominal_flights_take_off_and_land_in_both_modes() {
     for mode in [FlightMode::Angle, FlightMode::Acro] {

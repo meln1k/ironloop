@@ -371,12 +371,24 @@ impl Monitor {
     }
 
     /// Faults that excuse flight expectations, other than a lost link or
-    /// wind (which the failsafe must cope with on its own).
+    /// wind (which the failsafe must cope with on its own). The same fault
+    /// must be both: a fault that excuses nothing (an event drop, say)
+    /// during a link loss excuses nothing either.
     fn excusing_fault_besides_link(sc: &Scenario, t: u64) -> bool {
         sc.faults.iter().any(|f| {
             let window = f.at_us.saturating_sub(100_000)..f.at_us.saturating_add(f.dur_us).saturating_add(3_000_000);
-            window.contains(&t) && !matches!(f.kind, FaultKind::RcLoss | FaultKind::WindShift { .. })
-        }) && Self::excusing_fault(sc, t)
+            window.contains(&t)
+                && matches!(
+                    f.kind,
+                    FaultKind::Kick { .. }
+                        | FaultKind::Impact { .. }
+                        | FaultKind::MotorDesync { .. }
+                        | FaultKind::MotorDegraded { .. }
+                        | FaultKind::ImuDropout
+                        | FaultKind::ImuStuck
+                        | FaultKind::ImuGarbage { .. }
+                )
+        })
     }
 
     /// Inside a deliberate wild maneuver (flip, stick slam, drop) or the
