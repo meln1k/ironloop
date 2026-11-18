@@ -16,11 +16,6 @@ cortex-m = { version = "0.7", features = ["critical-section-single-core", "inlin
 cortex-m-rt = "0.7"
 static_cell = "2"
 
-[features]
-# ESCs without bidirectional DShot (BLHeli_S): send normal DShot and read no
-# eRPM. The stock Bluejay 0.19 ESCs answer with eRPM, so the default has it.
-no-erpm = []
-
 [profile.release]
 opt-level = 3
 lto = "fat"

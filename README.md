@@ -145,7 +145,7 @@ Enter DFU by holding the BOOT pad while plugging in USB, or from IronLoop itself
 
 CI (`.github/workflows/ci.yml`) runs those tests and builds the board firmware with warnings as errors; `scripts/mutants.py` also counts a core change that breaks the firmware build. Hardware facts and sources for this board are in `docs/hardware/mobula6-eco-2024.md`.
 
-The board builds the firmware's `Config` from the IMU it finds: the gyro and accelerometer ranges it programs, and the chip's mounting (CW0 for both chips, from Happymodel's factory dump). A panic, or the control loop missing the independent watchdog for about 50 ms (34–94 ms over the LSI clock's tolerance), resets the board; the ESCs stop on the missing signal, and arming afterwards needs the arm switch seen off first.
+The board gives the firmware's `Config` the gyro and accelerometer ranges it programs into the IMU; the mounting is the default CW0 for both chips, from Happymodel's factory dump. A panic, or the control loop missing the independent watchdog for about 50 ms (34–94 ms over the LSI clock's tolerance), resets the board; the ESCs stop on the missing signal, and arming afterwards needs the arm switch seen off first.
 
 **Not yet verified on hardware.** Before props go on, check on the bench: which IMU is fitted and its axis orientation, on a BMI270 board and on an ICM-42688 board (tilt the quad, watch attitude), motor order and direction, DShot reaching the ESCs, battery voltage scaling, and LED/beeper polarity. Then the timing checks, from the counters in `control::STATS` (IMU samples, missed data-ready edges, SPI read errors, dropped events, and `step` cycles from the DWT counter). SWD is unavailable, so they need the planned USB diagnostics to read them.
 
@@ -153,7 +153,7 @@ The board builds the firmware's `Config` from the IMU it finds: the gyro and acc
 - Step time: the longest `step` plus applying its effects (`step_cycles_max`, at 96 MHz) stays well under the sample period (312 µs, 30,000 cycles, for the BMI270), including during stick moves, arming, and disarming.
 - Dead data-ready line: with PA1 disconnected or held low, the quad must refuse to arm (IMU blocker). If it is disconnected while armed, the motors must stop within about 20 ms.
 
-- eRPM: with the quad strapped down and props off, spin each motor up from idle. Its eRPM should rise with throttle, reaching about 72,000 RPM × 6 pole pairs at full throttle on a full pack, and a motor held still while commanded hard must be reported as faulty within about 60 ms. The board sends inverted (bidirectional) DShot by default, which the stock Bluejay 0.19 ESCs answer; ESCs flashed with BLHeli_S need `--features no-erpm`.
+- eRPM: with the quad strapped down and props off, spin each motor up from idle. Its eRPM should rise with throttle, reaching about 72,000 RPM × 6 pole pairs at full throttle on a full pack, and a motor held still while commanded hard must be reported as faulty within about 60 ms. The board always sends inverted (bidirectional) DShot, which the stock Bluejay 0.19 ESCs answer; ESCs reflashed to BLHeli_S will not spin until Bluejay is flashed back.
 - RPM filter: with eRPM coming in, `step_cycles_max` must still fit the sample period (the filter runs 12 notches per sample and retunes them at every eRPM reply). In a hover, motor outputs should be visibly smoother than with `rpm_filter_harmonics = 0`.
 
 OSD over MSP DisplayPort and USB are not implemented yet.

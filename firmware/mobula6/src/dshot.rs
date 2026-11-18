@@ -21,8 +21,8 @@
 //!   the driver never waits on a stream that stopped.
 //!
 //! The Mobula6's stock ESCs run Bluejay 0.19, which answers inverted DShot
-//! with eRPM. For ESC firmware without bidirectional DShot (BLHeli_S), build
-//! with `--features no-erpm`: normal DShot, idling low, no replies.
+//! with eRPM. ESCs reflashed to BLHeli_S do not understand inverted DShot
+//! and will not spin; flash Bluejay back.
 
 use core::sync::atomic::{AtomicU8, Ordering, compiler_fence};
 
@@ -37,7 +37,6 @@ use embassy_stm32::peripherals::{DMA2_CH5, TIM1};
 use embassy_stm32::timer::low_level::{RoundTo, Timer};
 use ironloop_fc::proto::{BITBANG_SLOTS_PER_BIT, BITBANG_WORDS, decode_erpm_reply, dshot_bitbang, dshot_frame, reply_word};
 
-const ERPM: bool = cfg!(not(feature = "no-erpm"));
 /// GPIOB pin per motor, Betaflight order (RR, FR, RL, FL).
 const PIN_NUMBERS: [usize; 4] = [10, 6, 7, 8];
 const PINS: [u32; 4] = [1 << PIN_NUMBERS[0], 1 << PIN_NUMBERS[1], 1 << PIN_NUMBERS[2], 1 << PIN_NUMBERS[3]];
@@ -71,15 +70,12 @@ pub struct Dshot {
 }
 
 impl Dshot {
-    /// `pins` must start at the idle level: high for bidirectional DShot,
-    /// low without (see [`Dshot::IDLE_HIGH`]).
+    /// `pins` must start at the idle level, high.
     pub fn new(tim: Peri<'static, TIM1>, dma: Peri<'static, DMA2_CH5>, pins: [Output<'static>; 4]) -> Self {
         pac::RCC.ahb1enr().modify(|w| w.set_dma2en(true));
-        if ERPM {
-            for n in PIN_NUMBERS {
-                // Only matters while the pins are inputs between frames.
-                pac::GPIOB.pupdr().modify(|w| w.set_pupdr(n, Pupdr::PULL_UP));
-            }
+        for n in PIN_NUMBERS {
+            // Only matters while the pins are inputs between frames.
+            pac::GPIOB.pupdr().modify(|w| w.set_pupdr(n, Pupdr::PULL_UP));
         }
         let timer = Timer::new(tim);
         timer.stop();
@@ -91,23 +87,18 @@ impl Dshot {
         Dshot { timer, _dma: dma, _pins: pins, next: 0, readings: [None; 4] }
     }
 
-    /// The motor pins' level between frames.
-    pub const IDLE_HIGH: bool = ERPM;
-
     /// Sends one frame per motor. Values are DShot commands: 0 stops,
     /// 48..=2047 is throttle. Returns as soon as it starts. A call while a
     /// frame or its reply window is in progress (about 55 µs and 117 µs)
     /// first waits for it to finish, so a frame is never cut short.
     pub fn write(&mut self, values: [u16; 4]) {
-        let frames = values.map(|v| dshot_frame(v, false, ERPM));
+        let frames = values.map(|v| dshot_frame(v, false, true));
         self.wait_idle();
-        if ERPM {
-            self.read_reply();
-        }
+        self.read_reply();
         // SAFETY: the DMA stream has finished (above) before the table
         // changes, and only this driver (a single owner) touches it.
         let table = unsafe { &mut *(&raw mut TABLE) };
-        *table = dshot_bitbang(frames, PINS, ERPM);
+        *table = dshot_bitbang(frames, PINS, true);
 
         self.timer.stop();
         self.timer.enable_update_dma(false);
@@ -180,7 +171,7 @@ fn start_stream(dir: vals::Dir, par: u32, mar: u32, count: usize, size: vals::Si
     });
 }
 
-/// The stream finished: a frame went out (start the reply window, or stop),
+/// The stream finished: a frame went out (start the reply window),
 /// or a reply window ended (pins back to outputs, idling high). A transfer
 /// or direct-mode error stops the stream without completing it; it ends the
 /// frame or window the same way, skipping the reply window.
@@ -194,7 +185,7 @@ fn DMA2_STREAM5() {
         w.set_teif(i, true);
         w.set_dmeif(i, true);
     });
-    if ERPM && !failed && PHASE.load(Ordering::Relaxed) == SENDING {
+    if !failed && PHASE.load(Ordering::Relaxed) == SENDING {
         for n in PIN_NUMBERS {
             pac::GPIOB.moder().modify(|w| w.set_moder(n, Moder::INPUT));
         }
@@ -206,11 +197,9 @@ fn DMA2_STREAM5() {
         return;
     }
     pac::TIM1.cr1().modify(|w| w.set_cen(false));
-    if ERPM {
-        pac::GPIOB.bsrr().write_value(pac::gpio::regs::Bsrr(ALL));
-        for n in PIN_NUMBERS {
-            pac::GPIOB.moder().modify(|w| w.set_moder(n, Moder::OUTPUT));
-        }
+    pac::GPIOB.bsrr().write_value(pac::gpio::regs::Bsrr(ALL));
+    for n in PIN_NUMBERS {
+        pac::GPIOB.moder().modify(|w| w.set_moder(n, Moder::OUTPUT));
     }
     PHASE.store(IDLE, Ordering::Release);
 }

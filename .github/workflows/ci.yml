@@ -34,4 +34,3 @@ jobs:
         run: |
           deny='target.thumbv7em-none-eabihf.rustflags=["-D", "warnings"]'
           cargo build --release --config "$deny"
-          cargo build --release --features no-erpm --config "$deny"

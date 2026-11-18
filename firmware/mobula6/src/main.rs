@@ -159,8 +159,8 @@ async fn init(spawner: Spawner) {
 
     let led = Output::new(p.PC13, Level::High, Speed::Low); // off
     let beeper = Output::new(p.PC15, Level::Low, Speed::Low);
-    let idle = Level::from(dshot::Dshot::IDLE_HIGH);
-    let pin = |o: Peri<'static, AnyPin>| Output::new(o, idle, Speed::Medium);
+    // Bidirectional DShot idles high.
+    let pin = |o: Peri<'static, AnyPin>| Output::new(o, Level::High, Speed::Medium);
     let motors = dshot::Dshot::new(p.TIM1, p.DMA2_CH5, [pin(p.PB10.into()), pin(p.PB6.into()), pin(p.PB7.into()), pin(p.PB8.into())]);
     // The firmware streams stop commands from the first IMU sample; until
     // then the ESCs see an idle line, which they treat as no signal.
@@ -173,11 +173,10 @@ async fn init(spawner: Spawner) {
     // Without an IMU no `Imu` events arrive, so the firmware reports the
     // IMU arming blocker and never spins the motors.
     let imu = imu::Imu::init(spi, cs).await.ok();
-    // The board knows its sensor; the firmware's defaults do not.
+    // The board knows its sensor's ranges; the firmware's defaults do not.
     let config = Config {
         gyro_range: imu::GYRO_RANGE,
         accel_range: imu::ACCEL_RANGE,
-        imu_alignment: imu.as_ref().map_or(Config::default().imu_alignment, imu::Imu::alignment),
         ..Config::default()
     };
 
