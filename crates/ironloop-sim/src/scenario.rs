@@ -160,6 +160,11 @@ impl FaultKind {
         }
     }
 
+    /// Happens once, at its start, instead of lasting for its duration.
+    pub fn one_shot(&self) -> bool {
+        matches!(self, FaultKind::ClockGlitch { .. } | FaultKind::RebootRequest)
+    }
+
     pub fn excuse(&self) -> Excuse {
         match self {
             FaultKind::Kick { .. }

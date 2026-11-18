@@ -36,6 +36,8 @@ enum Ev {
     ApplyMotors,
     /// An IMU sample finishes its SPI read and reaches the event queue.
     ImuDeliver,
+    /// The one-shot fault at this index in the scenario happens.
+    Fault(usize),
 }
 
 #[derive(Clone, Debug)]
@@ -71,7 +73,8 @@ pub struct Sim {
     /// The IMU chip's low-pass state: two stages each for gyro and accel,
     /// and when it last ran.
     chip_lpf: Option<([Vec3; 2], [Vec3; 2], u64)>,
-    one_shot_done: Vec<bool>,
+    /// A clock jump back the firmware's next step will see.
+    clock_back_us: u64,
     /// Manual control from the visualizer replaces the virtual pilot.
     pub manual: Option<Sticks>,
     pub sticks: Sticks,
@@ -100,7 +103,6 @@ impl Sim {
         let fc = State::new(sc.fc);
         let status = fc.status();
         let seed = sc.seed;
-        let n_faults = sc.faults.len();
         let mut sim = Sim {
             world,
             fc: Some(fc),
@@ -123,7 +125,7 @@ impl Sim {
             pilot: Pilot::default(),
             last_imu_raw: None,
             chip_lpf: None,
-            one_shot_done: vec![false; n_faults],
+            clock_back_us: 0,
             manual: None,
             sticks: Sticks::default(),
             monitor: Monitor::new(&sc),
@@ -146,12 +148,24 @@ impl Sim {
             sim.schedule(1_500, Ev::Telemetry);
         }
         sim.schedule(500, Ev::Tick);
+        for i in 0..sim.sc.faults.len() {
+            sim.schedule_fault(i);
+        }
         sim
     }
 
     fn schedule(&mut self, t: u64, ev: Ev) {
         self.seq += 1;
         self.queue.push(Reverse((t, self.seq, ev)));
+    }
+
+    /// A one-shot fault is an event at its start; the others are read off
+    /// the scenario while they are active.
+    fn schedule_fault(&mut self, i: usize) {
+        let f = self.sc.faults[i];
+        if f.kind.one_shot() {
+            self.schedule(f.at_us, Ev::Fault(i));
+        }
     }
 
     pub fn fc_state(&self) -> &State {
@@ -165,7 +179,7 @@ impl Sim {
     /// Adds a fault at the current time (used by the interactive visualizer).
     pub fn inject(&mut self, kind: FaultKind, dur_us: u64) {
         self.sc.faults.push(Fault { at_us: self.t_us, dur_us, kind });
-        self.one_shot_done.push(false);
+        self.schedule_fault(self.sc.faults.len() - 1);
     }
 
     /// Ends every fault that is still running (motors recover, the wind
@@ -317,6 +331,12 @@ impl Sim {
                     self.read_imu(stamp, kind);
                 }
             }
+            Ev::Fault(i) => match self.sc.faults[i].kind {
+                FaultKind::ClockGlitch { back_us } => self.clock_back_us += back_us,
+                // The configurator asks over USB, whatever the RC link does.
+                FaultKind::RebootRequest => self.deliver(EventKind::Command(ironloop_fc::Command::RebootToBootloader)),
+                _ => {}
+            },
             Ev::ApplyMotors => {
                 if let Some(cmd) = self.pending_motors.pop_front() {
                     for (i, c) in cmd.into_iter().enumerate() {
@@ -454,13 +474,6 @@ impl Sim {
             None => self.pilot.sticks(&self.sc, &self.world, &self.status, &mut self.rng_rc, t, period as f32 * 1e-6),
         };
         self.sticks = sticks;
-        for i in 0..self.sc.faults.len() {
-            let f = self.sc.faults[i];
-            if f.kind == FaultKind::RebootRequest && t >= f.at_us && !self.one_shot_done[i] {
-                self.one_shot_done[i] = true;
-                self.deliver(EventKind::Command(ironloop_fc::Command::RebootToBootloader));
-            }
-        }
         if self.fault_active(FaultKind::RcLoss) {
             return;
         }
@@ -526,15 +539,7 @@ impl Sim {
     }
 
     fn step_fc(&mut self, stamp: u64, kind: EventKind) {
-        let mut t_fc = stamp + self.sc.clock_offset_us;
-        for (i, f) in self.sc.faults.iter().enumerate() {
-            if let FaultKind::ClockGlitch { back_us } = f.kind {
-                if self.t_us >= f.at_us && !self.one_shot_done[i] {
-                    self.one_shot_done[i] = true;
-                    t_fc = t_fc.saturating_sub(back_us);
-                }
-            }
-        }
+        let t_fc = (stamp + self.sc.clock_offset_us).saturating_sub(std::mem::take(&mut self.clock_back_us));
         let event = Event { t_us: t_fc, kind };
         let before = self.status;
         let state = self.fc.take().expect("fc state present");
