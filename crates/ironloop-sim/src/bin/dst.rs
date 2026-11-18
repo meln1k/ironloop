@@ -24,8 +24,8 @@ fn main() {
     let verbose = args.iter().any(|a| a == "--verbose");
 
     if args.iter().any(|a| a == "--properties") {
-        for (name, desc) in PROPERTIES {
-            println!("{name:28} {desc}");
+        for p in PROPERTIES {
+            println!("{:28} {}", p.name, p.doc);
         }
         return;
     }
@@ -188,7 +188,8 @@ fn main() {
         began.elapsed().as_secs_f64()
     );
     println!("properties ({}):", PROPERTIES.len());
-    for (name, _) in PROPERTIES {
+    for p in PROPERTIES {
+        let name = &p.name;
         let live = live_seeds.get(name).copied().unwrap_or(0);
         match by_prop.get(name) {
             None => println!("  ok    {name:30} live in {live} seeds"),

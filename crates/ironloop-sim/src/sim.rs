@@ -14,7 +14,7 @@ use ironloop_fc::{
 };
 use libm::{cosf, sinf};
 
-use crate::monitor::Monitor;
+use crate::monitor::{Monitor, Step};
 use crate::pilot::{Pilot, Sticks};
 use crate::physics::World;
 use crate::rng::Rng;
@@ -128,7 +128,7 @@ impl Sim {
             clock_back_us: 0,
             manual: None,
             sticks: Sticks::default(),
-            monitor: Monitor::new(&sc),
+            monitor: Monitor::default(),
             trace_hash: 0xcbf2_9ce4_8422_2325,
             motor_hash: 0xcbf2_9ce4_8422_2325,
             notices: Vec::new(),
@@ -207,7 +207,6 @@ impl Sim {
         while !self.done() {
             self.next_event();
         }
-        self.monitor.finish(&self.world, &self.sc, self.t_us);
     }
 
     /// Processes events up to and including time `t_us`.
@@ -569,7 +568,7 @@ impl Sim {
                 Effect::RebootToBootloader => self.rebooted_to_bootloader = true,
             }
         }
-        self.monitor.on_step(self.t_us, &event, &fx, &before, &status, &self.world, &self.sc);
+        self.monitor.on_step(Step { t: self.t_us, event: &event, fx: &fx, before: &before, after: &status, world: &self.world, sc: &self.sc });
     }
 }
 

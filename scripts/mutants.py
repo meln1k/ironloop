@@ -31,7 +31,7 @@ IMU = "crates/ironloop-fc/src/imu.rs"
 CONTROL = "crates/ironloop-fc/src/control.rs"
 FAILSAFE = "crates/ironloop-fc/src/failsafe.rs"
 PROTECT = "crates/ironloop-fc/src/protect.rs"
-MON = "crates/ironloop-sim/src/monitor.rs"
+MON = "crates/ironloop-sim/src/monitor/mod.rs"
 
 MIX_OK = """    [-1.0, -1.0, 1.0],
     [-1.0, 1.0, -1.0],
@@ -132,8 +132,8 @@ MUTANTS = {
     # The checker itself: a monitor bug that hides real firmware failures.
     "monitor: any fault during a link loss excuses the failsafe checks": [(
         MON,
-        "Self::excuses(sc, t, |e| e == Excuse::Flight)",
-        "Self::excuses(sc, t, |e| e != Excuse::LinkOrWeather) && Self::excusing_fault(sc, t)",
+        "excuses(sc, t, |e| e == Excuse::Flight)",
+        "excuses(sc, t, |e| e != Excuse::LinkOrWeather) && excuses(sc, t, |e| e != Excuse::Nothing)",
     )],
 }
 
