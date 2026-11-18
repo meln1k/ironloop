@@ -10,6 +10,8 @@
 //!   status LED, beeper, DFU reboot).
 //! - `rc_task`, thread mode: ELRS CRSF bytes on USART2 → `Rc` event
 //! - `battery_task`, thread mode: ADC VBAT/current at 50 Hz → `Battery` event
+//! - `usb::usb_task`, thread mode: a USB serial status line with the
+//!   control loop's counters, for bench checks
 //!
 //! A panic or a hung control loop (through the independent watchdog) resets
 //! the board. The ESCs stop on the missing DShot signal, and after the reset
@@ -27,6 +29,7 @@ mod control;
 mod dfu;
 mod dshot;
 mod imu;
+mod usb;
 
 use control::send;
 use embassy_executor::{Executor, InterruptExecutor, Spawner};
@@ -211,4 +214,5 @@ async fn init(spawner: Spawner) {
 
     let adc = Adc::new(p.ADC1);
     spawner.spawn(battery_task(adc, vbat, ibat).unwrap());
+    spawner.spawn(usb::usb_task(p.USB_OTG_FS, p.PA12, p.PA11).unwrap());
 }

@@ -147,7 +147,7 @@ CI (`.github/workflows/ci.yml`) runs those tests and builds the board firmware w
 
 The board gives the firmware's `Config` the gyro and accelerometer ranges it programs into the IMU; the mounting is the default CW0 for both chips, from Happymodel's factory dump. A panic, or the control loop missing the independent watchdog for about 50 ms (34–94 ms over the LSI clock's tolerance), resets the board; the ESCs stop on the missing signal, and arming afterwards needs the arm switch seen off first.
 
-**Not yet verified on hardware.** Before props go on, check on the bench: which IMU is fitted and its axis orientation, on a BMI270 board and on an ICM-42688 board (tilt the quad, watch attitude), motor order and direction, DShot reaching the ESCs, battery voltage scaling, and LED/beeper polarity. Then the timing checks, from the counters in `control::STATS` (IMU samples, missed data-ready edges, SPI read errors, dropped events, and `step` cycles from the DWT counter). SWD is unavailable, so they need the planned USB diagnostics to read them.
+**Not yet verified on hardware.** Before props go on, check on the bench: which IMU is fitted and its axis orientation, on a BMI270 board and on an ICM-42688 board (tilt the quad, watch attitude), motor order and direction, DShot reaching the ESCs, battery voltage scaling, and LED/beeper polarity. Then the timing checks, from the counters in `control::STATS` (IMU samples, missed data-ready edges, SPI read errors, dropped events, and `step` cycles from the DWT counter). SWD is unavailable, so the board prints them on a USB serial port (CDC-ACM, any baud) as one line per 100 ms, along with eRPM per motor, arming blockers, battery voltage, attitude, gyro, and motor commands; see `firmware/mobula6/src/usb.rs` for the format.
 
 - IMU rate: samples grow at 3.2 kHz with a BMI270 or 2 kHz with an ICM-42688, and missed data-ready edges stay at zero.
 - Step time: the longest `step` plus applying its effects (`step_cycles_max`, at 96 MHz) stays well under the sample period (312 µs, 30,000 cycles, for the BMI270), including during stick moves, arming, and disarming.
@@ -156,7 +156,7 @@ The board gives the firmware's `Config` the gyro and accelerometer ranges it pro
 - eRPM: with the quad strapped down and props off, spin each motor up from idle. Its eRPM should rise with throttle, reaching about 72,000 RPM × 6 pole pairs at full throttle on a full pack, and a motor held still while commanded hard must be reported as faulty within about 60 ms. The board always sends inverted (bidirectional) DShot, which the stock Bluejay 0.19 ESCs answer; ESCs reflashed to BLHeli_S will not spin until Bluejay is flashed back.
 - RPM filter: with eRPM coming in, `step_cycles_max` must still fit the sample period (the filter runs 12 notches per sample and retunes them at every eRPM reply). In a hover, motor outputs should be visibly smoother than with `rpm_filter_harmonics = 0`.
 
-OSD over MSP DisplayPort and USB are not implemented yet.
+OSD over MSP DisplayPort is not implemented yet, and the USB port only prints the status line.
 
 ## Future work
 
@@ -165,4 +165,4 @@ OSD over MSP DisplayPort and USB are not implemented yet.
   2. Flash IronLoop over WebUSB DFU.
   3. Walk the builder through setup and calibration with an LLM that reads live telemetry and explains each step. That means the bench checks above: IMU orientation (tilt the quad and watch the attitude; a quarter-turn mismatch is the build mistake DST seed 146 flies with), motor order and direction, battery voltage scaling, LED and beeper, and eRPM. It should end with a config the builder has confirmed.
 
-  This needs the USB interface on the board, which is not implemented yet.
+  This needs a USB interface on the board that takes commands; today it only prints the status line.

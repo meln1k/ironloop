@@ -10,7 +10,9 @@
 //!   a dead data-ready line gives ticks and no `Imu` events, so the
 //!   firmware's IMU timeout blocks arming or disarms.
 //!
-//! `STATS` counts samples, losses, and the cycle cost of `step`.
+//! `STATS` counts samples, losses, and the cycle cost of `step`. Every
+//! 100 ticks the loop also publishes the firmware's `Status` in `STATUS`;
+//! `usb` prints both on the USB serial port.
 
 use core::sync::atomic::{AtomicU32, Ordering::Relaxed};
 
@@ -26,11 +28,13 @@ use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::Channel;
 use embassy_sync::signal::Signal;
 use embassy_time::{Duration, Instant, Timer};
-use ironloop_fc::{Config, Effect, Event, EventKind, State, step};
+use ironloop_fc::{Config, Effect, Event, EventKind, State, Status, step};
 
 use crate::{dshot, imu};
 
 const TICK: Duration = Duration::from_millis(1);
+/// Ticks between `STATUS` updates (10 Hz).
+const STATUS_TICKS: u32 = 100;
 
 /// RC and battery events from thread mode, in arrival order.
 static EVENTS: Channel<CriticalSectionRawMutex, Event, 32> = Channel::new();
@@ -38,8 +42,11 @@ static EVENTS: Channel<CriticalSectionRawMutex, Event, 32> = Channel::new();
 /// Data-ready time (µs) of the newest IMU sample not yet read.
 static DRDY: Signal<CriticalSectionRawMutex, u64> = Signal::new();
 
-/// Bench counters, for the planned USB diagnostics (SWD is not reachable on
-/// this board).
+/// The firmware's latest `Status`, for the USB status line.
+pub static STATUS: Signal<CriticalSectionRawMutex, Status> = Signal::new();
+
+/// Bench counters, printed on the USB serial port by `usb` (SWD is not
+/// reachable on this board).
 pub struct Stats {
     /// IMU samples read and stepped.
     pub imu_samples: AtomicU32,
@@ -53,6 +60,8 @@ pub struct Stats {
     /// its effects. The BMI270 period is 312 µs, 30,000 cycles.
     pub step_cycles_last: AtomicU32,
     pub step_cycles_max: AtomicU32,
+    /// The newest valid eRPM reply per motor output (0 before the first).
+    pub erpm: [AtomicU32; 4],
 }
 
 #[unsafe(no_mangle)]
@@ -63,6 +72,7 @@ pub static STATS: Stats = Stats {
     events_dropped: AtomicU32::new(0),
     step_cycles_last: AtomicU32::new(0),
     step_cycles_max: AtomicU32::new(0),
+    erpm: [const { AtomicU32::new(0) }; 4],
 };
 
 fn now_us() -> u64 {
@@ -103,6 +113,7 @@ pub async fn control_task(
     // Edges during IMU set-up carry no sample worth a step.
     DRDY.reset();
     let mut next_tick = Instant::now() + TICK;
+    let mut ticks = 0u32;
     loop {
         // Every pass takes at most about a millisecond (the tick), so a
         // loop that stops passing here is hung.
@@ -133,7 +144,16 @@ pub async fn control_task(
                 }
                 let t_us = now.as_micros();
                 // The ESCs' eRPM since the last tick goes in just before it.
+                ticks += 1;
+                if ticks % STATUS_TICKS == 0 {
+                    STATUS.signal(state.status());
+                }
                 if let Some(erpm) = motors.take_telemetry() {
+                    for (stat, reading) in STATS.erpm.iter().zip(erpm) {
+                        if let Some(v) = reading {
+                            stat.store(v, Relaxed);
+                        }
+                    }
                     let telemetry = Event { t_us, kind: EventKind::MotorTelemetry { erpm } };
                     state = run(state, &telemetry, &mut motors, &mut led, &mut beeper);
                 }
