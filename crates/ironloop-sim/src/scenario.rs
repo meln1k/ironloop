@@ -427,14 +427,38 @@ impl Scenario {
         }
     }
 
-    /// Generates a random but reproducible scenario from `seed`.
+    /// Generates a random but reproducible scenario from `seed`. The parts
+    /// draw in turn from one stream, in the order that keeps every seed the
+    /// scenario it has always been (the regression seeds name scenarios).
     pub fn generate(seed: u64) -> Self {
-        let mut r = Rng::fork(seed, "scenario");
+        let r = &mut Rng::fork(seed, "scenario");
         let mut sc = Scenario::base(seed, String::new());
         let mut tags: Vec<String> = Vec::new();
+        sc.vary_hardware(r, &mut tags);
+        sc.vary_build(r, &mut tags);
+        let link_delay = sc.vary_handling(r, &mut tags);
+        let airborne_loss = sc.plan_flight(r, link_delay, &mut tags);
+        sc.place_faults(r, link_delay, airborne_loss, &mut tags);
+        if r.chance(0.15) {
+            // Start just below 2^32 µs so a 32-bit microsecond clock wraps
+            // in the middle of the flight.
+            let s = 1_000_000;
+            let wrap_at = r.range_u64(3 * s, sc.duration_us.saturating_sub(3 * s).max(3 * s + 1));
+            sc.clock_offset_us = (1u64 << 32) - wrap_at;
+            tags.push("clock-wrap".into());
+        }
+        // Drawn last so it left the rest of each scenario as it was.
+        sc.vbat_gain = r.range(0.97, 1.03);
+        tags.sort();
+        tags.dedup();
+        sc.name = if tags.is_empty() { "clean".into() } else { tags.join(",") };
+        sc
+    }
 
+    /// Airframe and battery tolerances, the IMU, the RC link, the weather.
+    fn vary_hardware(&mut self, r: &mut Rng, tags: &mut Vec<String>) {
         // Airframe variation: build tolerances, battery choice, worn parts.
-        let f = &mut sc.frame;
+        let f = &mut self.frame;
         f.mass *= r.range(0.92, 1.12);
         f.inertia = f.inertia * r.range(0.85, 1.2);
         f.k_t *= r.range(0.9, 1.08);
@@ -445,19 +469,19 @@ impl Scenario {
         }
 
         // Battery: charge, internal resistance (aged packs sag hard).
-        sc.battery.soc = r.range(0.12, 1.0);
+        self.battery.soc = r.range(0.12, 1.0);
         // A fresh 300 mAh 1S pack is about 0.03-0.08 ohm, a worn one 0.15.
-        sc.battery.r_int = r.range(0.03, 0.15);
-        sc.battery.volts = Battery::ocv(sc.battery.soc);
-        if sc.battery.soc < 0.3 {
+        self.battery.r_int = r.range(0.03, 0.15);
+        self.battery.volts = Battery::ocv(self.battery.soc);
+        if self.battery.soc < 0.3 {
             tags.push("low-battery".into());
         }
-        if sc.battery.r_int > 0.11 {
+        if self.battery.r_int > 0.11 {
             tags.push("old-pack".into());
         }
 
         // IMU: noise, bias, vibration, rate.
-        let imu = &mut sc.imu;
+        let imu = &mut self.imu;
         imu.odr_hz = *r.pick(&[1600.0, 3200.0, 3200.0, 4000.0]);
         imu.jitter_us = r.range_u64(2, 40);
         imu.read_delay_us = r.range_u64(80, 160);
@@ -484,50 +508,58 @@ impl Scenario {
             imu.vib_accel *= vib;
         }
 
-        sc.rc.rate_hz = *r.pick(&[50.0, 150.0, 250.0, 500.0]);
-        sc.rc.jitter_us = r.range_u64(50, 1500);
+        self.rc.rate_hz = *r.pick(&[50.0, 150.0, 250.0, 500.0]);
+        self.rc.jitter_us = r.range_u64(50, 1500);
 
         // Weather: indoor calm to gusty outdoors.
         if r.chance(0.5) {
             let speed = r.range(0.0, 4.0);
             let dir = r.range(0.0, core::f32::consts::TAU);
-            sc.wind.mean = Vec3::new(libm::cosf(dir) * speed, libm::sinf(dir) * speed, 0.0);
-            sc.wind.gust_sigma = r.range(0.0, 1.5);
-            sc.wind.gust_tau = r.range(0.5, 3.0);
+            self.wind.mean = Vec3::new(libm::cosf(dir) * speed, libm::sinf(dir) * speed, 0.0);
+            self.wind.gust_sigma = r.range(0.0, 1.5);
+            self.wind.gust_tau = r.range(0.5, 3.0);
             tags.push(format!("wind{speed:.0}"));
         }
+    }
 
+    /// How the board is mounted and configured, and build mistakes (rare).
+    fn vary_build(&mut self, r: &mut Rng, tags: &mut Vec<String>) {
         // Boards mount the IMU in any orientation; the configuration must
         // match it.
         const ALIGN: [ImuAlignment; 4] = [ImuAlignment::Cw0, ImuAlignment::Cw90, ImuAlignment::Cw180, ImuAlignment::Cw270];
         if r.chance(0.3) {
             let a = *r.pick(&ALIGN[1..]);
-            sc.imu.mount = a;
-            sc.fc.imu_alignment = a;
+            self.imu.mount = a;
+            self.fc.imu_alignment = a;
             tags.push("imu-rotated".into());
         }
         // Build mistakes and handling errors (rare).
         if r.chance(0.04) {
             // Configured a quarter turn off from how the chip is mounted.
-            let i = ALIGN.iter().position(|&a| a == sc.fc.imu_alignment).unwrap();
-            sc.imu.mount = ALIGN[(i + 1) % 4];
+            let i = ALIGN.iter().position(|&a| a == self.fc.imu_alignment).unwrap();
+            self.imu.mount = ALIGN[(i + 1) % 4];
             tags.push("imu-misaligned".into());
         }
         if r.chance(0.4) {
             // No bidirectional DShot: older ESC firmware, or turned off.
-            sc.esc_telemetry = false;
+            self.esc_telemetry = false;
             tags.push("no-telemetry".into());
         }
         if r.chance(0.03) {
-            sc.motors_swapped = true;
+            self.motors_swapped = true;
             tags.push("motors-swapped".into());
         }
         if r.chance(0.03) {
-            sc.battery.absent = true;
+            self.battery.absent = true;
             tags.push("usb-power".into());
         }
+    }
+
+    /// How the quad is handled before takeoff. Returns how long the
+    /// receiver takes to bind (0 for at once).
+    fn vary_handling(&mut self, r: &mut Rng, tags: &mut Vec<String>) -> u64 {
         if r.chance(0.08) {
-            sc.arm_switch_at_boot = true;
+            self.arm_switch_at_boot = true;
             tags.push("arm-on-boot".into());
         }
         // The receiver often binds a second or two after power-up, after gyro
@@ -535,7 +567,7 @@ impl Scenario {
         let link_delay = if r.chance(0.12) {
             tags.push("late-link".into());
             if r.chance(0.6) {
-                sc.arm_switch_at_boot = true;
+                self.arm_switch_at_boot = true;
                 tags.push("arm-on-boot".into());
             }
             r.range_u64(1_200_000, 2_500_000)
@@ -543,32 +575,36 @@ impl Scenario {
             0
         };
         if r.chance(0.08) {
-            sc.moved_at_boot = true;
+            self.moved_at_boot = true;
             tags.push("moved-at-boot".into());
         }
         if r.chance(0.06) {
-            sc.ground_tilt = (r.range(0.6, 1.5) * r.sign(), 0.0);
+            self.ground_tilt = (r.range(0.6, 1.5) * r.sign(), 0.0);
             tags.push("on-its-side".into());
         }
-        sc.initial_yaw = r.range(-core::f32::consts::PI, core::f32::consts::PI);
+        self.initial_yaw = r.range(-core::f32::consts::PI, core::f32::consts::PI);
+        link_delay
+    }
 
-        // Flight plan.
+    /// The pilot's plan of segments, and the scenario's length. Returns when
+    /// the link is lost for good in the air, if it is.
+    fn plan_flight(&mut self, r: &mut Rng, link_delay: u64, tags: &mut Vec<String>) -> Option<u64> {
         let s = 1_000_000u64;
         let mut t = (r.range_u64(15, 30) * s / 10).max(link_delay + 1_500_000);
         let mut mode = if r.chance(0.5) { FlightMode::Acro } else { FlightMode::Angle };
-        sc.segments.push(Segment { start_us: 0, mode, action: Action::Disarmed { throttle: 0.0 } });
+        self.segments.push(Segment { start_us: 0, mode, action: Action::Disarmed { throttle: 0.0 } });
         if r.chance(0.1) {
             // Try to arm with the throttle up first; it must be refused.
-            sc.segments.push(Segment { start_us: t, mode, action: Action::Arm { throttle: 0.4 } });
+            self.segments.push(Segment { start_us: t, mode, action: Action::Arm { throttle: 0.4 } });
             t += s;
-            sc.segments.push(Segment { start_us: t, mode, action: Action::Disarmed { throttle: 0.0 } });
+            self.segments.push(Segment { start_us: t, mode, action: Action::Disarmed { throttle: 0.0 } });
             t += s / 2;
             tags.push("arm-throttle-up".into());
         }
-        sc.segments.push(Segment { start_us: t, mode, action: Action::Arm { throttle: 0.0 } });
+        self.segments.push(Segment { start_us: t, mode, action: Action::Arm { throttle: 0.0 } });
         t += s / 2;
         let alt = r.range(1.0, 3.0);
-        sc.segments.push(Segment { start_us: t, mode, action: Action::Hover { alt } });
+        self.segments.push(Segment { start_us: t, mode, action: Action::Hover { alt } });
         t += r.range_u64(20, 40) * s / 10;
         let n = r.range_u64(3, 8);
         for _ in 0..n {
@@ -588,7 +624,7 @@ impl Scenario {
                 }
                 3 if mode == FlightMode::Acro => {
                     // Climb first so there is room for the flip.
-                    sc.segments.push(Segment { start_us: t, mode, action: Action::Hover { alt: 4.0 } });
+                    self.segments.push(Segment { start_us: t, mode, action: Action::Hover { alt: 4.0 } });
                     t += 3 * s;
                     tags.push("flip".into());
                     (Action::Flip { axis: r.range_u64(0, 2) as u8, dir: r.sign() }, 2 * s)
@@ -597,7 +633,7 @@ impl Scenario {
                     // Climb high: a 5 s hang falls about 35 m. Hangs past
                     // about 4 s read like lying on the ground (see crash
                     // detection in the firmware).
-                    sc.segments.push(Segment { start_us: t, mode, action: Action::Hover { alt: 45.0 } });
+                    self.segments.push(Segment { start_us: t, mode, action: Action::Hover { alt: 45.0 } });
                     t += 22 * s;
                     tags.push("inverted-hang".into());
                     let yaw = if r.chance(0.5) { r.range(-1.0, 1.0) } else { 0.0 };
@@ -606,7 +642,7 @@ impl Scenario {
                 7 => {
                     // Room below for an open-loop sequence (acro: rates;
                     // angle: how far each stick tilts the quad).
-                    sc.segments.push(Segment { start_us: t, mode, action: Action::Hover { alt: 6.0 } });
+                    self.segments.push(Segment { start_us: t, mode, action: Action::Hover { alt: 6.0 } });
                     t += 4 * s;
                     tags.push("stick-script".into());
                     (Action::StickScript { amp: r.range(0.2, 0.6) }, STICK_SCRIPT_US)
@@ -621,10 +657,10 @@ impl Scenario {
                 }
                 _ => (Action::Hover { alt: r.range(1.0, 3.0) }, 2 * s),
             };
-            sc.segments.push(Segment { start_us: t, mode, action });
+            self.segments.push(Segment { start_us: t, mode, action });
             t += dur;
             if action.is_maneuver() {
-                sc.segments.push(Segment { start_us: t, mode, action: Action::Hover { alt: 2.0 } });
+                self.segments.push(Segment { start_us: t, mode, action: Action::Hover { alt: 2.0 } });
                 t += 3 * s;
             }
         }
@@ -635,32 +671,36 @@ impl Scenario {
             tags.push("rc-loss-airborne".into());
             let alt = r.range(1.5, 15.0);
             let climb = 3 * s + (alt / 3.0 * 1e6) as u64;
-            sc.segments.push(Segment { start_us: t, mode, action: Action::Hover { alt } });
+            self.segments.push(Segment { start_us: t, mode, action: Action::Hover { alt } });
             t += climb;
             airborne_loss = Some(t - s / 2);
-            sc.segments.push(Segment { start_us: t, mode, action: Action::Land });
+            self.segments.push(Segment { start_us: t, mode, action: Action::Land });
             t += 12 * s;
         }
         if r.chance(0.1) {
             tags.push("drop".into());
-            sc.segments.push(Segment { start_us: t, mode, action: Action::Drop });
+            self.segments.push(Segment { start_us: t, mode, action: Action::Drop });
             t += 3 * s;
             // A dazed pilot leaves it armed: crash detection must cut motors.
             t += 2 * s;
         } else {
-            sc.segments.push(Segment { start_us: t, mode, action: Action::Land });
+            self.segments.push(Segment { start_us: t, mode, action: Action::Land });
             t += 5 * s;
         }
-        sc.segments.push(Segment { start_us: t, mode, action: Action::Disarmed { throttle: 0.0 } });
+        self.segments.push(Segment { start_us: t, mode, action: Action::Disarmed { throttle: 0.0 } });
         t += 2 * s;
-        sc.duration_us = t;
+        self.duration_us = t;
+        airborne_loss
+    }
 
-        // Faults: zero to three, placed while flying (from 2 s after the
-        // first takeoff until the final landing begins).
-        let takeoff = sc.segments.iter().find(|g| matches!(g.action, Action::Hover { .. })).map_or(0, |g| g.start_us);
-        let flight = (takeoff + 2 * s, t.saturating_sub(7 * s));
-        let n_faults = *r.pick(&[0u64, 0, 1, 1, 2, 3]);
-        for _ in 0..n_faults {
+    /// Zero to three faults placed while flying (from 2 s after the first
+    /// takeoff until the final landing begins), plus the link losses the
+    /// plan needs and, rarely, an IMU that hangs as the pilot arms.
+    fn place_faults(&mut self, r: &mut Rng, link_delay: u64, airborne_loss: Option<u64>, tags: &mut Vec<String>) {
+        let s = 1_000_000u64;
+        let takeoff = self.segments.iter().find(|g| matches!(g.action, Action::Hover { .. })).map_or(0, |g| g.start_us);
+        let flight = (takeoff + 2 * s, self.duration_us.saturating_sub(7 * s));
+        for _ in 0..*r.pick(&[0u64, 0, 1, 1, 2, 3]) {
             let at = r.range_u64(flight.0, flight.1.max(flight.0 + 1));
             let motor = r.range_u64(0, 4) as u8;
             let (kind, dur, tag) = match r.range_u64(0, 18) {
@@ -674,7 +714,10 @@ impl Scenario {
                     (FaultKind::Kick { torque: axis * k }, r.range_u64(5_000, 40_000), "kick")
                 }
                 4 => (FaultKind::MotorDesync { motor }, r.range_u64(20_000, 300_000), "desync"),
-                5 if r.chance(0.3) => (FaultKind::MotorDead { motor }, FOREVER, "motor-dead"),
+                // A dead motor is rarer than the other faults: in the other
+                // seven of ten draws this slot places nothing.
+                5 if !r.chance(0.3) => continue,
+                5 => (FaultKind::MotorDead { motor }, FOREVER, "motor-dead"),
                 6 => (FaultKind::MotorDegraded { motor, factor: r.range(0.6, 0.9) }, FOREVER, "motor-degraded"),
                 7 | 8 => (FaultKind::RcLoss, *r.pick(&[30_000, 80_000, 150_000, 600_000, 1_500_000, 8_000_000]), "rc-loss"),
                 9 => (FaultKind::RcGlitch { p: r.range(0.01, 0.3) }, r.range_u64(200_000, 3_000_000), "rc-glitch"),
@@ -692,43 +735,28 @@ impl Scenario {
                     let dw = r.range(15.0, 40.0);
                     let dur = r.range_u64(300, 900);
                     let axis = Vec3::new(r.normal(), r.normal(), 0.2 * r.normal()).normalized();
-                    let torque = axis * (sc.frame.inertia.x * dw / (dur as f32 * 1e-6));
-                    (FaultKind::Impact { torque }, dur, "impact")
+                    (FaultKind::Impact { torque: axis * (self.frame.inertia.x * dw / (dur as f32 * 1e-6)) }, dur, "impact")
                 }
                 16 => (FaultKind::EventDrop { p: r.range(0.01, 0.2) }, r.range_u64(200_000, 3_000_000), "event-drop"),
-                17 => (FaultKind::FcStall, r.range_u64(1_000, 15_000), "fc-stall"),
-                _ => continue,
+                _ => (FaultKind::FcStall, r.range_u64(1_000, 15_000), "fc-stall"),
             };
-            sc.faults.push(Fault { at_us: at, dur_us: dur, kind });
+            self.faults.push(Fault { at_us: at, dur_us: dur, kind });
             tags.push(tag.into());
         }
         if let Some(at) = airborne_loss {
-            sc.faults.push(Fault { at_us: at, dur_us: 12_000_000, kind: FaultKind::RcLoss });
+            self.faults.push(Fault { at_us: at, dur_us: 12_000_000, kind: FaultKind::RcLoss });
         }
         if link_delay > 0 {
-            sc.faults.push(Fault { at_us: 0, dur_us: link_delay, kind: FaultKind::RcLoss });
+            self.faults.push(Fault { at_us: 0, dur_us: link_delay, kind: FaultKind::RcLoss });
         }
         if r.chance(0.05) {
             // The IMU hangs (or its bus does) just as the pilot arms: the
             // first arm attempt must be refused.
-            let arm = sc.segments.iter().find(|g| matches!(g.action, Action::Arm { throttle } if throttle == 0.0)).map_or(0, |g| g.start_us);
+            let arm = self.segments.iter().find(|g| matches!(g.action, Action::Arm { throttle } if throttle == 0.0)).map_or(0, |g| g.start_us);
             let kind = if r.chance(0.5) { FaultKind::ImuStuck } else { FaultKind::ImuDropout };
-            sc.faults.push(Fault { at_us: arm.saturating_sub(200_000), dur_us: 600_000, kind });
+            self.faults.push(Fault { at_us: arm.saturating_sub(200_000), dur_us: 600_000, kind });
             tags.push("imu-dead-at-arm".into());
         }
-        sc.faults.sort_by_key(|f| f.at_us);
-        if r.chance(0.15) {
-            // Start just below 2^32 µs so a 32-bit microsecond clock wraps
-            // in the middle of the flight.
-            let wrap_at = r.range_u64(3 * s, t.saturating_sub(3 * s).max(3 * s + 1));
-            sc.clock_offset_us = (1u64 << 32) - wrap_at;
-            tags.push("clock-wrap".into());
-        }
-        // Drawn last so it leaves the rest of the scenario as it was.
-        sc.vbat_gain = r.range(0.97, 1.03);
-        tags.sort();
-        tags.dedup();
-        sc.name = if tags.is_empty() { "clean".into() } else { tags.join(",") };
-        sc
+        self.faults.sort_by_key(|f| f.at_us);
     }
 }
