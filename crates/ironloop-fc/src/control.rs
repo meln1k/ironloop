@@ -33,16 +33,13 @@ pub(crate) fn dshot(frac: f32) -> u16 {
 
 /// Motor speed for a throttle at the pack's voltage, relative to the same
 /// throttle at the sag-compensation reference voltage: 1 while compensation
-/// keeps up, less below about 3.1 V a cell where it is capped at 1.25x (a
+/// keeps up, less below about 3.1 V where it is capped at 1.25x (a
 /// sagging pack then needs more throttle to hover), more above the
 /// reference (a fresh pack needs less).
 pub(crate) fn sag_ratio(s: &State) -> f32 {
     let cfg = &s.cfg;
-    match (cfg.vbat_sag_comp, s.battery_volts) {
-        (true, Some(v)) if v > 0.5 => {
-            let vref = cfg.vbat_ref_cell * cfg.battery_cells as f32;
-            (vref / v).clamp(1.0, 1.25) * v / vref
-        }
+    match s.battery_volts {
+        Some(v) if v > 0.5 => (cfg.vbat_ref / v).clamp(1.0, 1.25) * v / cfg.vbat_ref,
         _ => 1.0,
     }
 }
@@ -160,8 +157,8 @@ pub(crate) fn control(s: &mut State, gyro: Vec3, accel: Vec3, dt: f32, reset: bo
     }
     let (lo, hi) = (lo / span.max(1.0), hi / span.max(1.0));
     let mut thr = throttle.clamp(0.0, 1.0);
-    let comp = match (cfg.vbat_sag_comp, s.battery_volts) {
-        (true, Some(v)) if v > 0.5 => (cfg.vbat_ref_cell * cfg.battery_cells as f32 / v).clamp(1.0, 1.25),
+    let comp = match s.battery_volts {
+        Some(v) if v > 0.5 => (cfg.vbat_ref / v).clamp(1.0, 1.25),
         _ => 1.0,
     };
     thr = (thr * comp).min(1.0);

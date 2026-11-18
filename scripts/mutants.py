@@ -81,7 +81,7 @@ MUTANTS = {
     "angle pitch target inverted": [(CONTROL, "up_in_body(roll * cfg.angle_limit, -pitch * cfg.angle_limit)", "up_in_body(roll * cfg.angle_limit, pitch * cfg.angle_limit)")],
     "angle_limit 80 deg": [(CFG, "angle_limit: 55.0f32.to_radians(),", "angle_limit: 80.0f32.to_radians(),")],
     "I-term winds up at zero throttle": [(CONTROL, "s.flight.airmode_active && throttle > THROTTLE_LOW && !s.flight.mixer_saturated", "s.flight.airmode_active && !s.flight.mixer_saturated")],
-    "vbat sag compensation inverted": [(CONTROL, "(cfg.vbat_ref_cell * cfg.battery_cells as f32 / v).clamp(1.0, 1.25)", "(v / (cfg.vbat_ref_cell * cfg.battery_cells as f32)).clamp(0.8, 1.0)")],
+    "vbat sag compensation inverted": [(CONTROL, "(cfg.vbat_ref / v).clamp(1.0, 1.25),", "(v / cfg.vbat_ref).clamp(0.8, 1.0),")],
     "armed motor drops to 0 when mix is negative": [(CONTROL, "let f = cfg.motor_idle + (1.0 - cfg.motor_idle) * m;", "let f = if m <= 0.0 { 0.0 } else { cfg.motor_idle + (1.0 - cfg.motor_idle) * m };")],
     # Crash and runaway detection.
     "no crash detection": [(PROTECT, "if (hit && lying_for >= cfg.crash_still_us) || blocked_for >= cfg.crash_blocked_us {", "if false {")],
@@ -122,7 +122,7 @@ MUTANTS = {
     "no re-convergence after gyro saturation": [(IMU, "s.fast_converge_until_us = now + 1_500_000;", "s.fast_converge_until_us = now;")],
     # Runaway, notices, link recovery.
     "no runaway detection": [(PROTECT, "let runaway = pid_high && spinning && (pushed_back || !flown);", "let runaway = false;")],
-    "battery warning at 3.75 V": [(CFG, "vbat_warn_cell: 3.45,", "vbat_warn_cell: 3.75,")],
+    "battery warning at 3.75 V": [(CFG, "vbat_warn: 3.45,", "vbat_warn: 3.75,")],
     "motor fault below 95% of expected eRPM": [(CFG, "motor_fault_frac: 0.3,", "motor_fault_frac: 0.95,")],
     "failsafe needs 3 s of link to recover": [(CFG, "failsafe_recovery_us: 300_000,", "failsafe_recovery_us: 3_000_000,")],
     "failsafe hold at 130% hover": [(FAILSAFE, "FailsafeStage::Hold => Some(s.hover_throttle / sag_ratio(s)),", "FailsafeStage::Hold => Some(s.hover_throttle * 1.3 / sag_ratio(s)),")],

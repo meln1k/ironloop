@@ -12,16 +12,14 @@ pub(crate) fn on_battery(s: &mut State, volts: f32, fx: &mut Out) {
         None => volts,
     };
     s.battery_volts = Some(v);
-    let cells = s.cfg.battery_cells as f32;
-    let per_cell = v / cells;
     let hyst = 0.05;
     let level = match s.battery_level {
-        BatteryLevel::Ok if per_cell < s.cfg.vbat_crit_cell => BatteryLevel::Critical,
-        BatteryLevel::Ok if per_cell < s.cfg.vbat_warn_cell => BatteryLevel::Warning,
-        BatteryLevel::Warning if per_cell < s.cfg.vbat_crit_cell => BatteryLevel::Critical,
-        BatteryLevel::Warning if per_cell > s.cfg.vbat_warn_cell + hyst => BatteryLevel::Ok,
-        BatteryLevel::Critical if per_cell > s.cfg.vbat_warn_cell + hyst => BatteryLevel::Ok,
-        BatteryLevel::Critical if per_cell > s.cfg.vbat_crit_cell + hyst => BatteryLevel::Warning,
+        BatteryLevel::Ok if v < s.cfg.vbat_crit => BatteryLevel::Critical,
+        BatteryLevel::Ok if v < s.cfg.vbat_warn => BatteryLevel::Warning,
+        BatteryLevel::Warning if v < s.cfg.vbat_crit => BatteryLevel::Critical,
+        BatteryLevel::Warning if v > s.cfg.vbat_warn + hyst => BatteryLevel::Ok,
+        BatteryLevel::Critical if v > s.cfg.vbat_warn + hyst => BatteryLevel::Ok,
+        BatteryLevel::Critical if v > s.cfg.vbat_crit + hyst => BatteryLevel::Warning,
         l => l,
     };
     if level != s.battery_level {
@@ -36,7 +34,7 @@ pub(crate) fn check_motors(s: &mut State, erpm: &[Option<u32>; 4], fx: &mut Out)
         return;
     }
     let vcomp = s.battery_volts.map_or(1.0, |v| {
-        (v / (s.cfg.vbat_ref_cell * s.cfg.battery_cells as f32)).clamp(0.6, 1.2)
+        (v / s.cfg.vbat_ref).clamp(0.6, 1.2)
     });
     for i in 0..4 {
         let Some(rpm) = erpm[i] else { continue };

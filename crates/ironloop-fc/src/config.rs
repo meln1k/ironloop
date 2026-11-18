@@ -72,14 +72,13 @@ pub struct Config {
     pub motor_idle: f32,
     /// Throttle above which airmode (full PID authority, I-term) engages.
     pub airmode_throttle: f32,
-    pub battery_cells: u8,
-    /// Throttle scaling reference voltage per cell (sag compensation).
-    pub vbat_ref_cell: f32,
-    pub vbat_sag_comp: bool,
-    pub vbat_warn_cell: f32,
-    pub vbat_crit_cell: f32,
+    // Battery voltages are for the whole pack, which on this quad is 1S.
+    /// Throttle scaling reference voltage (sag compensation).
+    pub vbat_ref: f32,
+    pub vbat_warn: f32,
+    pub vbat_crit: f32,
     /// Below this a battery counts as absent (USB power) and blocks arming.
-    pub vbat_min_arm_cell: f32,
+    pub vbat_min_arm: f32,
 
     /// RC is lost after this long without a valid frame (µs).
     pub rc_timeout_us: u64,
@@ -170,12 +169,10 @@ impl Default for Config {
             angle_rate_limit: 600.0f32.to_radians(),
             motor_idle: 0.055,
             airmode_throttle: 0.25,
-            battery_cells: 1,
-            vbat_ref_cell: 3.9,
-            vbat_sag_comp: true,
-            vbat_warn_cell: 3.45,
-            vbat_crit_cell: 3.3,
-            vbat_min_arm_cell: 3.3,
+            vbat_ref: 3.9,
+            vbat_warn: 3.45,
+            vbat_crit: 3.3,
+            vbat_min_arm: 3.3,
             rc_timeout_us: 100_000,
             failsafe_stage1_us: 1_000_000,
             // No barometer: the descent is open loop at about 1-2 m/s, so

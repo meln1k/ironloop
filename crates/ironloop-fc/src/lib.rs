@@ -447,8 +447,7 @@ impl State {
         if self.attitude.tilt() > self.cfg.max_arm_tilt {
             b |= ArmBlockers::TILT;
         }
-        let min = self.cfg.vbat_min_arm_cell * self.cfg.battery_cells as f32;
-        if self.battery_volts.is_none_or(|v| v < min) {
+        if self.battery_volts.is_none_or(|v| v < self.cfg.vbat_min_arm) {
             b |= ArmBlockers::BATTERY;
         }
         ArmBlockers(b)
