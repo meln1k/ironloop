@@ -157,3 +157,12 @@ The board builds the firmware's `Config` from the IMU it finds: the gyro and acc
 - RPM filter: with eRPM coming in, `step_cycles_max` must still fit the sample period (the filter runs 12 notches per sample and retunes them at every eRPM reply). In a hover, motor outputs should be visibly smoother than with `rpm_filter_harmonics = 0`.
 
 OSD over MSP DisplayPort and USB are not implemented yet.
+
+## Future work
+
+- [ ] **Browser setup and calibration guide over WebUSB, assisted by an LLM.** Plug a stock quad into the browser and the page does the rest:
+  1. Back up the stock firmware first: read the whole flash over the ROM DFU bootloader and keep it, plus the Betaflight CLI dump, so the quad can always go back.
+  2. Flash IronLoop over WebUSB DFU.
+  3. Walk the builder through setup and calibration with an LLM that reads live telemetry and explains each step. That means the bench checks above: IMU orientation (tilt the quad and watch the attitude; a quarter-turn mismatch is the build mistake DST seed 146 flies with), motor order and direction, battery voltage scaling, LED and beeper, and eRPM. It should end with a config the builder has confirmed.
+
+  This needs the USB interface on the board, which is not implemented yet.
