@@ -19,9 +19,7 @@ impl Rig {
         Rig { s: State::default(), t: 0, fx: std::vec::Vec::new() }
     }
     fn ev(&mut self, kind: EventKind) {
-        let s = core::mem::take(&mut self.s);
-        let (s, fx) = step(s, &Event { t_us: self.t, kind });
-        self.s = s;
+        let fx = step(&mut self.s, &Event { t_us: self.t, kind });
         self.fx.extend(fx);
     }
     /// Runs `ms` of level, still IMU samples at 2 kHz with RC at 100 Hz.
@@ -227,10 +225,8 @@ fn mirrored_flight_mirrors_motors(
             events.push((EventKind::Battery { volts: 3.8, amps: 2.0 }, EventKind::Battery { volts: 3.8, amps: 2.0 }));
         }
         for (ea, eb) in events {
-            let (sa, fa) = step(core::mem::take(&mut a), &Event { t_us: t, kind: ea });
-            let (sb, fb) = step(core::mem::take(&mut b), &Event { t_us: t, kind: eb });
-            a = sa;
-            b = sb;
+            let fa = step(&mut a, &Event { t_us: t, kind: ea });
+            let fb = step(&mut b, &Event { t_us: t, kind: eb });
             let ma = fa.iter().filter_map(|e| if let Effect::Motors(m) = e { Some(*m) } else { None });
             let mb = fb.iter().filter_map(|e| if let Effect::Motors(m) = e { Some(*m) } else { None });
             for (ma, mb) in ma.zip(mb) {

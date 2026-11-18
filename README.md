@@ -2,10 +2,10 @@
 
 A simulation-first quadrotor flight controller for the HDZero Mobula6 ECO 2024.
 
-The whole firmware is one pure function:
+The whole firmware is one function of its state and an event:
 
 ```rust
-pub fn step(state: State, event: &Event) -> (State, heapless::Vec<Effect, 8>)
+pub fn step(state: &mut State, event: &Event) -> heapless::Vec<Effect, 8>
 ```
 
 Events are timestamped IMU samples, RC frames, battery readings, ESC telemetry, 1 kHz ticks, and commands. Effects are DShot motor values, LED, beeper, notices, and "reboot to DFU". `step` never reads a clock, touches hardware, or allocates. The same code runs on the STM32F411, in the deterministic simulator, and in the browser.

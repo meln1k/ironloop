@@ -1,7 +1,7 @@
 //! IronLoop on the HDZero Mobula6 ECO 2024 (STM32F411CEU6, embassy).
 //!
-//! The flight controller itself is `ironloop_fc::step`, the same pure
-//! function the simulator and the browser run. This crate only turns
+//! The flight controller itself is `ironloop_fc::step`, the same function
+//! the simulator and the browser run. This crate only turns
 //! hardware into timestamped events and effects back into hardware:
 //!
 //! - `control::control_task`, on a high-priority interrupt executor: owns

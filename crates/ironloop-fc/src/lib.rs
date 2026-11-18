@@ -1,10 +1,10 @@
 //! IronLoop flight controller core.
 //!
-//! The whole firmware is one pure function, [`step`]: it takes the current
+//! The whole firmware is one function, [`step`]: it takes the current
 //! [`State`] and one timestamped [`Event`] (an IMU sample, an RC frame, a
-//! battery reading, ESC telemetry, a housekeeping tick or a command) and
-//! returns the next state plus the [`Effect`]s the board must perform (motor
-//! outputs, LED, beeper, notices, bootloader jump). It never reads a clock,
+//! battery reading, ESC telemetry, a housekeeping tick or a command),
+//! advances the state in place, and returns the [`Effect`]s the board must
+//! perform (motor outputs, LED, beeper, notices, bootloader jump). It never reads a clock,
 //! touches hardware, allocates, or keeps hidden state, so the same code runs
 //! on the STM32F411 under embassy, in the deterministic simulator, and in the
 //! browser.
@@ -471,8 +471,10 @@ impl Default for State {
     }
 }
 
-/// The firmware: advance `state` by one event.
-pub fn step(mut s: State, event: &Event) -> (State, Effects) {
+/// The firmware: advance `s` by one event. It takes the state by reference
+/// rather than by value: moving the 1.6 KB `State` in and out costs more on
+/// the Cortex-M4 than most events' work.
+pub fn step(s: &mut State, event: &Event) -> Effects {
     let mut fx = Out::default();
     if !s.started {
         s.started = true;
@@ -493,12 +495,12 @@ pub fn step(mut s: State, event: &Event) -> (State, Effects) {
 
     let motors_before = s.motors;
     match event.kind {
-        EventKind::Imu { gyro, accel } => imu::on_imu(&mut s, gyro, accel, &mut fx),
-        EventKind::Rc { channels } => on_rc(&mut s, &channels, &mut fx),
-        EventKind::Battery { volts, amps: _ } => health::on_battery(&mut s, volts, &mut fx),
+        EventKind::Imu { gyro, accel } => imu::on_imu(s, gyro, accel, &mut fx),
+        EventKind::Rc { channels } => on_rc(s, &channels, &mut fx),
+        EventKind::Battery { volts, amps: _ } => health::on_battery(s, volts, &mut fx),
         EventKind::MotorTelemetry { erpm } => {
-            imu::on_erpm(&mut s, &erpm);
-            health::check_motors(&mut s, &erpm, &mut fx);
+            imu::on_erpm(s, &erpm);
+            health::check_motors(s, &erpm, &mut fx);
         }
         EventKind::Tick => {}
         EventKind::Command(Command::RebootToBootloader) => {
@@ -507,7 +509,7 @@ pub fn step(mut s: State, event: &Event) -> (State, Effects) {
             }
         }
     }
-    housekeeping(&mut s, &mut fx);
+    housekeeping(s, &mut fx);
     // `s.motors` is the one motor command; send it on every IMU sample,
     // whenever it changed (arming, disarming), and on ticks while IMU
     // samples are late: ESCs need a steady stream, so the last command
@@ -522,7 +524,7 @@ pub fn step(mut s: State, event: &Event) -> (State, Effects) {
         fx.send_motors(s.motors);
     }
     s.effects_dropped = s.effects_dropped.saturating_add(fx.dropped);
-    (s, fx.list)
+    fx.list
 }
 
 impl Out {

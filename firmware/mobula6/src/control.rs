@@ -158,19 +158,19 @@ pub async fn control_task(
                         }
                     }
                     let telemetry = Event { t_us, kind: EventKind::MotorTelemetry { erpm } };
-                    state = run(state, &telemetry, &mut motors, &mut led, &mut beeper);
+                    run(&mut state, &telemetry, &mut motors, &mut led, &mut beeper);
                 }
                 Event { t_us, kind: EventKind::Tick }
             }
         };
-        state = run(state, &event, &mut motors, &mut led, &mut beeper);
+        run(&mut state, &event, &mut motors, &mut led, &mut beeper);
     }
 }
 
 /// Steps the firmware on one event and applies its effects.
-fn run(state: State, event: &Event, motors: &mut dshot::Dshot, led: &mut Output<'static>, beeper: &mut Output<'static>) -> State {
+fn run(state: &mut State, event: &Event, motors: &mut dshot::Dshot, led: &mut Output<'static>, beeper: &mut Output<'static>) {
     let start = DWT::cycle_count();
-    let (state, effects) = step(state, event);
+    let effects = step(state, event);
     // Only the last motor command of a step goes out: an earlier one
     // would be superseded within microseconds anyway.
     let mut command = None;
@@ -196,5 +196,4 @@ fn run(state: State, event: &Event, motors: &mut dshot::Dshot, led: &mut Output<
     let cycles = DWT::cycle_count().wrapping_sub(start);
     STATS.step_cycles_last.store(cycles, Relaxed);
     STATS.step_cycles_max.fetch_max(cycles, Relaxed);
-    state
 }

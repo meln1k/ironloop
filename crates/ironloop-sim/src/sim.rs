@@ -44,7 +44,7 @@ enum Ev {
 pub struct Sim {
     pub sc: Scenario,
     pub world: World,
-    fc: Option<State>,
+    fc: State,
     pub t_us: u64,
     physics_us: u64,
     queue: BinaryHeap<Reverse<(u64, u64, Ev)>>,
@@ -112,7 +112,7 @@ impl Sim {
         let seed = sc.seed;
         let mut sim = Sim {
             world,
-            fc: Some(fc),
+            fc,
             t_us: 0,
             physics_us: 0,
             queue: BinaryHeap::new(),
@@ -177,7 +177,7 @@ impl Sim {
     }
 
     pub fn fc_state(&self) -> &State {
-        self.fc.as_ref().expect("fc state present between events")
+        &self.fc
     }
 
     pub fn done(&self) -> bool {
@@ -550,10 +550,8 @@ impl Sim {
         let t_fc = (stamp + self.sc.clock_offset_us).saturating_sub(std::mem::take(&mut self.clock_back_us));
         let event = Event { t_us: t_fc, kind };
         let before = self.status;
-        let state = self.fc.take().expect("fc state present");
-        let (state, fx) = step(state, &event);
-        let status = state.status();
-        self.fc = Some(state);
+        let fx = step(&mut self.fc, &event);
+        let status = self.fc.status();
         self.status = status;
         self.events_delivered += 1;
 
