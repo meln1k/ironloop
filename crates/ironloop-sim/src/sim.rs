@@ -16,7 +16,7 @@ use libm::{cosf, sinf};
 
 use crate::monitor::Monitor;
 use crate::pilot::{Pilot, Sticks};
-use crate::physics::{MotorHealth, World};
+use crate::physics::World;
 use crate::rng::Rng;
 use crate::scenario::{Fault, FaultKind, Scenario};
 
@@ -168,7 +168,8 @@ impl Sim {
         self.one_shot_done.push(false);
     }
 
-    /// Clears injected faults that are still running and repairs motors.
+    /// Ends every fault that is still running (motors recover, the wind
+    /// settles back to its mean).
     pub fn clear_faults(&mut self) {
         let t = self.t_us;
         for f in &mut self.sc.faults {
@@ -176,10 +177,6 @@ impl Sim {
                 f.dur_us = t.saturating_sub(f.at_us);
             }
         }
-        for m in &mut self.world.motors {
-            m.health = MotorHealth::Ok;
-        }
-        self.world.wind.mean = self.sc.wind.mean;
     }
 
     /// The first active fault `pick` accepts, as what `pick` takes from it.
@@ -224,7 +221,6 @@ impl Sim {
 
     fn apply_world_faults(&mut self) {
         let t = self.physics_us;
-        let mut wind = self.sc.wind.mean;
         if self.sc.moved_at_boot && t < 1_400_000 {
             // Picked up and turned over in the hand while booting, then set
             // back down level.
@@ -238,34 +234,25 @@ impl Sim {
             }
             b.vel = Vec3::ZERO;
         }
-        for f in &self.sc.faults {
-            let active = f.active(t);
-            match f.kind {
-                FaultKind::Kick { torque } | FaultKind::Impact { torque } if active => {
-                    self.world.kick = Some((f.end_us(), torque));
-                }
-                FaultKind::MotorDesync { motor } => {
-                    let m = &mut self.world.motors[motor as usize];
-                    if active {
-                        m.health = MotorHealth::Desync;
-                    } else if m.health == MotorHealth::Desync && t >= f.at_us {
-                        m.health = MotorHealth::Ok;
-                    }
-                }
-                FaultKind::MotorDead { motor } if active => {
-                    self.world.motors[motor as usize].health = MotorHealth::Dead;
-                }
-                FaultKind::MotorDegraded { motor, factor } if active => {
-                    let m = &mut self.world.motors[motor as usize];
-                    if m.health == MotorHealth::Ok {
-                        m.health = MotorHealth::Degraded(factor);
-                    }
-                }
-                FaultKind::WindShift { wind: w } if active => wind = w,
-                _ => {}
-            }
+        // The world's faulted parts follow the faults active now, so a
+        // fault that ends (or is cleared) leaves nothing to repair.
+        let active = || self.sc.faults.iter().filter(move |f| f.active(t)).map(|f| f.kind);
+        self.world.wind.mean = active()
+            .filter_map(|k| match k {
+                FaultKind::WindShift { wind } => Some(wind),
+                _ => None,
+            })
+            .last()
+            .unwrap_or(self.sc.wind.mean);
+        self.world.kick = active()
+            .filter_map(|k| match k {
+                FaultKind::Kick { torque } | FaultKind::Impact { torque } => Some(torque),
+                _ => None,
+            })
+            .last();
+        for (i, m) in self.world.motors.iter_mut().enumerate() {
+            m.health = self.sc.motor_health(i, t);
         }
-        self.world.wind.mean = wind;
     }
 
     pub fn next_event(&mut self) {

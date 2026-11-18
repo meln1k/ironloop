@@ -186,8 +186,8 @@ pub struct World {
     pub motors: [Motor; 4],
     pub battery: Battery,
     pub wind: Wind,
-    /// Extra body torque applied for a short time (prop strike, collision).
-    pub kick: Option<(u64, Vec3)>,
+    /// Extra body torque from a prop strike or collision, while it lasts.
+    pub kick: Option<Vec3>,
 }
 
 /// ESCs stop the motors when DShot frames stop arriving.
@@ -300,12 +300,8 @@ impl World {
         force_b += -(f.drag_lin.mul_elem(air_b) + f.drag_quad.mul_elem(air_b) * speed);
         force_b += -Vec3::new(air_b.x, air_b.y, 0.0) * (f.rotor_drag * omega_sum);
         torque += -body.omega * f.rot_damping;
-        if let Some((until, k)) = self.kick {
-            if now_us < until {
-                torque += k;
-            } else {
-                self.kick = None;
-            }
+        if let Some(k) = self.kick {
+            torque += k;
         }
 
         let mut force_w = q.rotate(force_b) + Vec3::new(0.0, 0.0, f.mass * GRAVITY);

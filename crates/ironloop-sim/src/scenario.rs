@@ -4,7 +4,7 @@
 use ironloop_fc::math::Vec3;
 use ironloop_fc::{Config, FlightMode, ImuAlignment};
 
-use crate::physics::{Airframe, Battery, Wind};
+use crate::physics::{Airframe, Battery, MotorHealth, Wind};
 use crate::rng::Rng;
 
 #[derive(Clone, Debug)]
@@ -334,6 +334,21 @@ impl Scenario {
             || self.imu.mount != self.fc.imu_alignment
             || self.battery.absent
             || self.faults.iter().any(|f| matches!(f.kind, FaultKind::MotorDead { .. }))
+    }
+
+    /// What the faults active at `t` leave of physical motor `motor`: dead
+    /// over stalled over weakened (the first weakening wins).
+    pub fn motor_health(&self, motor: usize, t: u64) -> MotorHealth {
+        let mut health = MotorHealth::Ok;
+        for f in self.faults.iter().filter(|f| f.active(t)) {
+            health = match (f.kind, health) {
+                (FaultKind::MotorDead { motor: m }, _) if m as usize == motor => MotorHealth::Dead,
+                (FaultKind::MotorDesync { motor: m }, MotorHealth::Ok | MotorHealth::Degraded(_)) if m as usize == motor => MotorHealth::Desync,
+                (FaultKind::MotorDegraded { motor: m, factor }, MotorHealth::Ok) if m as usize == motor => MotorHealth::Degraded(factor),
+                _ => health,
+            };
+        }
+        health
     }
 
     /// The physical motor that motor output `output` drives: with the wires
