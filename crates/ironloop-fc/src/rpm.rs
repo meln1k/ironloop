@@ -7,8 +7,6 @@
 //! kHz, so a harmonic above half the sample rate shows up aliased; the notch
 //! goes where it actually appears.
 
-use libm::{cosf, sinf};
-
 use crate::math::Vec3;
 
 pub const MAX_HARMONICS: usize = 3;
@@ -29,14 +27,9 @@ impl Notch {
     /// `input` is the latest gyro sample: a notch switching on starts as if
     /// it had been passing it all along, not from zero (which would kick the
     /// output by the whole gyro rate).
-    fn tune(&mut self, hz: f32, sample_hz: f32, q: f32, min_hz: f32, input: Vec3) {
-        let f = alias(hz, sample_hz);
-        if !(min_hz..0.45 * sample_hz).contains(&f) {
-            *self = Notch::OFF;
-            return;
-        }
-        let w = 2.0 * core::f32::consts::PI * f / sample_hz;
-        let (s, c) = (sinf(w), cosf(w));
+    /// `(s, c)` are the sine and cosine of the notch frequency in radians
+    /// per sample, 0..pi.
+    fn tune(&mut self, (s, c): (f32, f32), q: f32, input: Vec3) {
         let alpha = s / (2.0 * q);
         let a0 = 1.0 + alpha;
         let was_off = self.c.is_none();
@@ -63,6 +56,20 @@ impl Notch {
     }
 }
 
+/// Sine and cosine of `x` in 0..=pi, as single-precision polynomials. The
+/// Cortex-M4's FPU has no double precision, and `libm`'s `sinf` and `cosf`
+/// work in `f64`, so each call there is a few hundred emulated operations.
+/// The error here is below 1e-6.
+fn sin_cos(x: f32) -> (f32, f32) {
+    // sin x = cos y and cos x = -sin y for y = x - pi/2 in -pi/2..=pi/2,
+    // where the Taylor series to y^12 converges well within f32 precision.
+    let y = x - core::f32::consts::FRAC_PI_2;
+    let y2 = y * y;
+    let sin_y = y * (1.0 + y2 * (-1.0 / 6.0 + y2 * (1.0 / 120.0 + y2 * (-1.0 / 5040.0 + y2 * (1.0 / 362_880.0 + y2 * (-1.0 / 39_916_800.0))))));
+    let cos_y = 1.0 + y2 * (-0.5 + y2 * (1.0 / 24.0 + y2 * (-1.0 / 720.0 + y2 * (1.0 / 40_320.0 + y2 * (-1.0 / 3_628_800.0 + y2 * (1.0 / 479_001_600.0))))));
+    (cos_y, -sin_y)
+}
+
 /// Where a tone at `hz` appears when sampled at `sample_hz`.
 fn alias(hz: f32, sample_hz: f32) -> f32 {
     let f = hz % sample_hz;
@@ -86,11 +93,24 @@ impl RpmFilter {
     /// Places motor `i`'s notches for its rotation at `rotation_hz` (`None`:
     /// unknown, so off), the first `harmonics` of them.
     pub fn set_motor(&mut self, i: usize, rotation_hz: Option<f32>, sample_hz: f32, harmonics: usize, q: f32, min_hz: f32) {
+        let Some(f) = rotation_hz else {
+            self.notches[i] = [Notch::OFF; MAX_HARMONICS];
+            return;
+        };
+        // One sine and cosine per motor: harmonic h + 1 is h + 1 times the
+        // fundamental's angle per sample, so angle addition gives the rest.
+        // Aliasing mirrors an angle to 2 pi minus it, which keeps its cosine
+        // and flips its sine, so the notch takes the sine's magnitude.
+        let w1 = sin_cos(2.0 * core::f32::consts::PI * alias(f, sample_hz) / sample_hz);
+        let mut w = w1;
         for (h, n) in self.notches[i].iter_mut().enumerate() {
-            match rotation_hz {
-                Some(f) if h < harmonics => n.tune(f * (h + 1) as f32, sample_hz, q, min_hz, self.last_input),
-                _ => *n = Notch::OFF,
+            let at = alias(f * (h + 1) as f32, sample_hz);
+            if h < harmonics && (min_hz..0.45 * sample_hz).contains(&at) {
+                n.tune((w.0.abs(), w.1), q, self.last_input);
+            } else {
+                *n = Notch::OFF;
             }
+            w = (w.0 * w1.1 + w.1 * w1.0, w.1 * w1.1 - w.0 * w1.0);
         }
     }
 
@@ -113,6 +133,7 @@ impl RpmFilter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use libm::sinf;
 
     /// RMS output of the filter for a sine on the x axis after it settles.
     fn gain(f: &mut RpmFilter, hz: f32, sample_hz: f32) -> f32 {
@@ -151,6 +172,17 @@ mod tests {
         f.set_motor(0, Some(1100.0), fs, 1, 3.0, 100.0);
         assert!(gain(&mut f.clone(), 1100.0, fs) < 0.05);
         assert!(gain(&mut f, 500.0, fs) < 0.05);
+        // Harmonics fold too: at 3.2 kHz a 680 Hz rotation's third harmonic,
+        // 2,040 Hz, appears at 1,160 Hz; at 1.6 kHz a 1,100 Hz rotation's
+        // second, 2,200 Hz, appears at 600 Hz.
+        let mut f = RpmFilter::default();
+        f.set_motor(0, Some(680.0), 3200.0, 3, 3.0, 100.0);
+        for hz in [680.0, 1360.0, 2040.0, 1160.0] {
+            assert!(gain(&mut f.clone(), hz, 3200.0) < 0.05, "{hz} Hz passes");
+        }
+        f.set_motor(0, Some(1100.0), 1600.0, 2, 3.0, 100.0);
+        assert!(gain(&mut f.clone(), 2200.0, 1600.0) < 0.05);
+        assert!(gain(&mut f, 200.0, 1600.0) > 0.9);
     }
 
     #[test]
