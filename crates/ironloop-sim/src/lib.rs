@@ -10,13 +10,15 @@
 
 pub mod monitor;
 pub mod physics;
+pub mod pilot;
 pub mod rng;
 pub mod scenario;
 pub mod sim;
 
 pub use monitor::{Monitor, Violation};
 pub use scenario::{Action, FOREVER, Fault, FaultKind, Scenario};
-pub use sim::{Sim, Sticks};
+pub use pilot::Sticks;
+pub use sim::Sim;
 
 /// Result of one seeded run.
 #[derive(Clone, Debug)]
