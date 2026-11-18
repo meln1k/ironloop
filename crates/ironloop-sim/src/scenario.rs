@@ -309,6 +309,9 @@ pub struct Scenario {
     /// Added to every timestamp the firmware sees, e.g. to wrap a u32 µs
     /// clock mid-flight.
     pub clock_offset_us: u64,
+    /// The board's battery voltage reading as a fraction of the truth
+    /// (resistor divider and ADC tolerance).
+    pub vbat_gain: f32,
 }
 
 /// Length of a [`Action::StickScript`] segment.
@@ -420,6 +423,7 @@ impl Scenario {
             motors_swapped: false,
             esc_telemetry: true,
             clock_offset_us: 0,
+            vbat_gain: 1.0,
         }
     }
 
@@ -720,6 +724,8 @@ impl Scenario {
             sc.clock_offset_us = (1u64 << 32) - wrap_at;
             tags.push("clock-wrap".into());
         }
+        // Drawn last so it leaves the rest of the scenario as it was.
+        sc.vbat_gain = r.range(0.97, 1.03);
         tags.sort();
         tags.dedup();
         sc.name = if tags.is_empty() { "clean".into() } else { tags.join(",") };

@@ -325,7 +325,6 @@ pub struct Monitor {
     protect: protect::Protect,
     flight: flight::Flight,
     script: script::Script,
-    faults_started: usize,
     last_t: u64,
     /// (speed, vertical speed downward) in the last airborne step.
     airborne_speed: Option<(f32, f32)>,
@@ -363,15 +362,10 @@ impl Monitor {
         };
         let mut v = Verdicts { violations: &mut self.violations, stats: &mut self.stats };
 
-        // Faults that start while flying (coverage).
-        while let Some(f) = sc.faults.get(self.faults_started) {
-            if f.at_us > t {
-                break;
-            }
-            if after.armed && cx.airborne {
-                v.stats.faults_in_flight.push(f.kind.name());
-            }
-            self.faults_started += 1;
+        // Faults that started since the last step while flying (coverage).
+        if after.armed && cx.airborne {
+            let started = sc.faults.iter().filter(|f| f.at_us > self.last_t && f.at_us <= t);
+            v.stats.faults_in_flight.extend(started.map(|f| f.kind.name()));
         }
 
         // Arming and disarming are judged against the link and the IMU as

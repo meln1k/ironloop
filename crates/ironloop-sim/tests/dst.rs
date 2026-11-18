@@ -51,15 +51,16 @@ fn regression_seeds_hold_every_property() {
     }
 }
 
-/// Seed 1762 loses the link at altitude while the IMU timing jitters. The
-/// monitor once let an unrelated fault like that switch the failsafe checks
-/// off, which hid seed 1444 touching down at 2.6 m/s; this landing must be
-/// judged, and soft.
+/// Seed 1269 loses the link at altitude and touches down by failsafe while
+/// one of its faults that excuse nothing (a clock jump, RC corruption) is
+/// still in its window. The monitor once let unrelated faults like these switch the
+/// failsafe checks off, which hid a failsafe touchdown at 2.6 m/s; this
+/// landing must be judged, and soft.
 #[test]
 fn failsafe_landing_is_judged_through_an_unrelated_fault() {
-    let r = run_seed(1762);
-    assert!(r.violations.is_empty(), "seed 1762 [{}]: {:?}", r.name, r.violations);
-    assert!(r.stats.live.get("failsafe_lands_softly").is_some_and(|&n| n > 0), "seed 1762: touchdown not judged: {:?}", r.stats.live);
+    let r = run_seed(1269);
+    assert!(r.violations.is_empty(), "seed 1269 [{}]: {:?}", r.name, r.violations);
+    assert!(r.stats.live.get("failsafe_lands_softly").is_some_and(|&n| n > 0), "seed 1269: touchdown not judged: {:?}", r.stats.live);
 }
 
 #[test]
@@ -81,11 +82,19 @@ fn seeds_where(pred: impl Fn(&Scenario) -> bool, n: usize) -> Vec<Scenario> {
     (0..400).map(Scenario::generate).filter(|s| pred(s)).take(n).collect()
 }
 
-/// Hash of every motor command, and whether the gyro ever clipped.
+/// Hash of every motor command, and whether the IMU may have clipped: the
+/// gyro reported saturating, or the true specific force plus the most prop
+/// vibration can add came within reach of the accelerometer's range (a
+/// crash can hit the ground at over 100 g).
 fn motors(sc: Scenario) -> (u64, bool) {
+    let accel_reach = sc.imu.accel_range - 2.0 * sc.imu.vib_accel;
     let mut sim = ironloop_sim::Sim::new(sc);
-    sim.run();
-    let clipped = sim.notices.iter().any(|(_, n)| *n == ironloop_fc::Notice::GyroSaturated);
+    let mut clipped = false;
+    while !sim.done() {
+        sim.next_event();
+        clipped |= sim.world.specific_force().max_abs() >= accel_reach;
+    }
+    clipped |= sim.notices.iter().any(|(_, n)| *n == ironloop_fc::Notice::GyroSaturated);
     (sim.motor_hash, clipped)
 }
 
@@ -116,7 +125,7 @@ fn matched_imu_mounting_does_not_change_the_motors() {
     // IMU faults corrupt one sensor axis, which differs between mountings.
     let imu_fault = |s: &Scenario| s.faults.iter().any(|f| matches!(f.kind, ironloop_sim::FaultKind::ImuGarbage { .. }));
     // The sensor clips asymmetrically (-32768..32767 LSB), so mountings
-    // differ by one LSB once the gyro saturates; compare flights that don't.
+    // differ by one LSB once it saturates; compare flights that don't.
     let mut checked = 0;
     for sc in seeds_where(|s| s.imu.mount == Cw0 && s.fc.imu_alignment == Cw0 && !imu_fault(s), 12) {
         let (base, clipped) = motors(sc.clone());

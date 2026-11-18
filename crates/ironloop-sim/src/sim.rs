@@ -66,6 +66,9 @@ pub struct Sim {
     imu_next_ideal: f64,
     rng_imu: Rng,
     rng_rc: Rng,
+    /// The virtual pilot's own stream, so modelling the link differently
+    /// does not change how the pilot flies.
+    rng_pilot: Rng,
     rng_env: Rng,
     rng_esc: Rng,
     pilot: Pilot,
@@ -120,6 +123,7 @@ impl Sim {
             imu_next_ideal: 0.0,
             rng_imu: Rng::fork(seed, "imu"),
             rng_rc: Rng::fork(seed, "rc"),
+            rng_pilot: Rng::fork(seed, "pilot"),
             rng_env: Rng::fork(seed, "env"),
             rng_esc: Rng::fork(seed, "esc"),
             pilot: Pilot::default(),
@@ -279,11 +283,10 @@ impl Sim {
             Ev::Rc => self.on_rc(),
             Ev::Battery => {
                 let b = &self.world.battery;
-                let gain = 1.0 + 0.01 * ((self.sc.seed % 7) as f32 - 3.0);
                 let volts = if b.absent {
                     0.05 + 0.02 * self.rng_esc.f32()
                 } else {
-                    ((b.volts + 0.01 * self.rng_esc.normal()) * gain * 100.0).round() / 100.0
+                    ((b.volts + 0.01 * self.rng_esc.normal()) * self.sc.vbat_gain * 100.0).round() / 100.0
                 };
                 // The board corrects the Mobula6 current sensor's 25% error.
                 let amps = b.amps;
@@ -470,7 +473,7 @@ impl Sim {
 
         let sticks = match self.manual {
             Some(s) => s,
-            None => self.pilot.sticks(&self.sc, &self.world, &self.status, &mut self.rng_rc, t, period as f32 * 1e-6),
+            None => self.pilot.sticks(&self.sc, &self.world, &self.status, &mut self.rng_pilot, t, period as f32 * 1e-6),
         };
         self.sticks = sticks;
         if self.fault_active(FaultKind::RcLoss) {
