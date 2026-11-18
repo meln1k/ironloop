@@ -1,7 +1,7 @@
 //! Deterministic simulation test runner.
 //!
 //! ```text
-//! dst [--seeds N] [--start S] [--seed X] [--verbose] [--properties]
+//! dst [--seeds N] [--start S] [--seed X] [--verbose] [--properties] [--list-failures]
 //! ```
 //!
 //! Runs `N` generated scenarios starting at seed `S` on all cores, checks
@@ -11,6 +11,9 @@
 //! live in at least two seeds, a fault kind never injected in flight, or
 //! less than a quarter of the simulated time spent flying. `--seed X`
 //! replays one seed with its full scenario, notices, and stats.
+//! `--list-failures` also prints every failing seed, one
+//! `failure <seed> <property> <time_us> [<workload>] <detail>` line each,
+//! for scripts.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -136,6 +139,13 @@ fn main() {
                     v.detail,
                     r.name
                 );
+            }
+        }
+    }
+    if args.iter().any(|a| a == "--list-failures") {
+        for r in &reports {
+            for v in &r.violations {
+                println!("failure {} {} {} [{}] {}", r.seed, v.property, v.t_us, r.name, v.detail);
             }
         }
     }

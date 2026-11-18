@@ -12,8 +12,8 @@ Usage: scripts/mutants.py [seeds] [name filter]   (default 300; run from anywher
 For the unmodified firmware and then each mutant this runs the DST sweep,
 the firmware unit tests, and the simulator tests, and builds the Mobula6
 board firmware (a core change it no longer compiles against). A mutant is caught when
-any of them fails where the unmodified firmware passed: a new failing test
-or property, or more seeds failing a property that already fails. The
+any of them fails where the unmodified firmware passed: a new failing test,
+or a property failing on a seed where it held before. The
 source files are restored after every mutant, even on Ctrl-C or SIGTERM.
 """
 
@@ -143,30 +143,30 @@ def run(cmd):
 
 
 def check(seeds):
-    """Builds and runs every check; returns the set of failures, where a
-    property failure is (property, failing seed count)."""
+    """Builds and runs every check; returns the set of failures: a property
+    on a seed as "property@seed", anything else by name."""
     b = run(["cargo", "build", "-q", "--release", "-p", "ironloop-sim", "--bin", "dst"])
     if b.returncode != 0:
-        return {("build", b.stderr[-300:])}
-    out = run(["./target/release/dst", "--seeds", seeds]).stdout
+        return {"build: " + b.stderr[-300:]}
+    out = run(["./target/release/dst", "--seeds", seeds, "--list-failures"]).stdout
     fails = set()
     for line in out.splitlines():
-        m = re.match(r"  FAIL  (\S+)\s+\((\d+) seeds", line)
-        if m:
-            fails.add((m.group(1), int(m.group(2))))
-        elif line.startswith("  FAIL  ") or line.startswith("  THIN  "):
-            fails.add((line.strip(), 0))
+        if line.startswith("failure "):
+            _, seed, prop = line.split()[:3]
+            fails.add(f"{prop}@{seed}")
+        elif line.startswith("  FAIL  deterministic_replay") or line.startswith("  THIN  "):
+            fails.add(line.strip())
     # Type-checking is enough to see a core change break the board, and
     # skips the firmware's fat-LTO link on every mutant.
     fw = subprocess.run(["cargo", "check", "-q"], cwd="firmware/mobula6", capture_output=True, text=True)
     if fw.returncode != 0:
-        fails.add(("firmware build", 0))
+        fails.add("firmware build")
     for pkg, extra in (("ironloop-fc", []), ("ironloop-sim", ["--test", "dst"])):
         t = run(["cargo", "test", "-q", "--release", "-p", pkg] + extra)
         # `-q` reports a failure as "name --- FAILED".
-        failed = {(m, 0) for m in re.findall(r"^(\S+) --- FAILED$", t.stdout, re.M)}
+        failed = set(re.findall(r"^(\S+) --- FAILED$", t.stdout, re.M))
         if t.returncode != 0 and not failed:
-            failed = {(f"{pkg} tests failed or did not build", 0)}
+            failed = {f"{pkg} tests failed or did not build"}
         fails |= failed
     return fails
 
@@ -181,8 +181,14 @@ def write(path, text):
 
 
 def new_failures(base, got):
-    base_count = dict(base)
-    return sorted(f"{p}({n})" if n else p for p, n in got if p not in base_count or n > base_count[p])
+    """What fails now and did not before, with a property's seeds grouped:
+    "name(seed, seed)"."""
+    new = got - base
+    seeds = {}
+    for f in new:
+        prop, _, seed = f.partition("@")
+        seeds.setdefault(prop, []).append(seed)
+    return sorted(f"{p}({', '.join(sorted(s, key=int))})" if s[0] else p for p, s in seeds.items())
 
 
 def main():
@@ -193,7 +199,7 @@ def main():
     only = sys.argv[2] if len(sys.argv) > 2 else ""
     originals = {f: open(f).read() for f in {f for m in MUTANTS.values() for f, _, _ in m}}
     base = check(seeds)
-    print(f"baseline: {', '.join(sorted(f'{p}({n})' for p, n in base)) or 'clean'}", flush=True)
+    print(f"baseline: {', '.join(new_failures(set(), base)) or 'clean'}", flush=True)
     survived = []
     try:
         for name, edits in MUTANTS.items():
