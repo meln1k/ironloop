@@ -64,6 +64,8 @@ pub struct Dshot {
     timer: Timer<'static, TIM1>,
     _dma: Peri<'static, DMA2_CH5>,
     _pins: [Output<'static>; 4],
+    /// The newest command not yet on the wire.
+    pending: Option<[u16; 4]>,
     /// The motor whose reply is decoded next.
     next: usize,
     readings: [Option<u32>; 4],
@@ -84,16 +86,26 @@ impl Dshot {
         // SAFETY: `DMA2_STREAM5` below handles it and touches only this
         // driver's stream, timer, and pins.
         unsafe { interrupt::DMA2_STREAM5.enable() };
-        Dshot { timer, _dma: dma, _pins: pins, next: 0, readings: [None; 4] }
+        Dshot { timer, _dma: dma, _pins: pins, pending: None, next: 0, readings: [None; 4] }
     }
 
     /// Sends one frame per motor. Values are DShot commands: 0 stops,
-    /// 48..=2047 is throttle. Returns as soon as it starts. A call while a
-    /// frame or its reply window is in progress (about 55 µs and 117 µs)
-    /// first waits for it to finish, so a frame is never cut short.
+    /// 48..=2047 is throttle. Never waits: while a frame or its reply window
+    /// is in progress (about 55 µs and 117 µs), the command is held, a newer
+    /// one replaces it, and [`Dshot::flush`] sends it once the line is free.
+    /// A frame is never cut short.
     pub fn write(&mut self, values: [u16; 4]) {
+        self.pending = Some(values);
+        self.flush();
+    }
+
+    /// Sends the held command, if any, once the line is free.
+    pub fn flush(&mut self) {
+        if PHASE.load(Ordering::Acquire) != IDLE {
+            return;
+        }
+        let Some(values) = self.pending.take() else { return };
         let frames = values.map(|v| dshot_frame(v, false, true));
-        self.wait_idle();
         self.read_reply();
         // SAFETY: the DMA stream has finished (above) before the table
         // changes, and only this driver (a single owner) touches it.

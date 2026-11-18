@@ -118,6 +118,9 @@ pub async fn control_task(
         // Every pass takes at most about a millisecond (the tick), so a
         // loop that stops passing here is hung.
         watchdog.pet();
+        // A motor command held back by a frame still on the wire goes out
+        // now; the next pass comes within a tick.
+        motors.flush();
         // Queued RC and battery events go first: they were stamped before
         // anything the loop has not yet seen, so time stays in order even
         // after a long step.
@@ -179,6 +182,8 @@ fn run(state: State, event: &Event, motors: &mut dshot::Dshot, led: &mut Output<
             Effect::Beeper(on) => beeper.set_level(Level::from(on)),
             Effect::Notice(_) => {}
             Effect::RebootToBootloader => {
+                // The stop frame goes out whole before the reset.
+                motors.wait_idle();
                 motors.write([0; 4]);
                 motors.wait_idle();
                 crate::dfu::reboot();
