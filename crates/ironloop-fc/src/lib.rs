@@ -224,6 +224,10 @@ struct Flight {
     last_pid: Vec3,
     throttle_demand: f32,
     runaway_since_us: Option<u64>,
+    /// Since when the PIDs have pushed at their limit against a clipped
+    /// gyro, and the yaw output against the yaw rate (`runaway_and_crash`).
+    clipped_since_us: Option<u64>,
+    yaw_opposed_since_us: Option<u64>,
     runaway_ok_us: u64,
     /// Since arming, the climb estimate has shown the quad rising while
     /// upright: it left the ground under its own thrust.
@@ -313,6 +317,11 @@ pub struct State {
     /// The build has flown properly since power-up (runaway detection
     /// switched itself off once), so motor order and direction are right.
     flight_proven: bool,
+    /// Runaway detection disarmed this power-up's build, which has not
+    /// shown it flies: re-arming waits until the frame lies still and the
+    /// tilt estimate has snapped to the accelerometer, since a tumble on a
+    /// build that cannot fly leaves the estimate wrong.
+    runaway_tripped: bool,
     boot_gesture_since_us: Option<u64>,
 
     battery_volts: Option<f32>,
@@ -375,6 +384,7 @@ impl State {
             flight: Flight::default(),
             runaway_active: false,
             flight_proven: false,
+            runaway_tripped: false,
             boot_gesture_since_us: None,
             battery_volts: None,
             battery_level: BatteryLevel::Ok,
@@ -444,7 +454,8 @@ impl State {
         if self.imu_stale() {
             b |= ArmBlockers::IMU;
         }
-        if self.attitude.tilt() > self.cfg.max_arm_tilt {
+        let settled = self.still_since_us.is_some_and(|t| self.now_us.saturating_sub(t) >= imu::GROUND_SETTLED_US);
+        if self.attitude.tilt() > self.cfg.max_arm_tilt || (self.runaway_tripped && !settled) {
             b |= ArmBlockers::TILT;
         }
         if self.battery_volts.is_none_or(|v| v < self.cfg.vbat_min_arm) {
@@ -596,6 +607,7 @@ fn on_rc(s: &mut State, channels: &[u16; RC_CHANNELS], fx: &mut Out) {
             // fall) must not mistake the fight back from a crash for one;
             // crash detection handles that.
             s.runaway_active = !s.flight_proven;
+            s.runaway_tripped = false;
             // Spin up to idle now. Until the next IMU sample runs the
             // controller, the keep-alive tick repeats this command; left at
             // the disarmed zeros it would hold the motors stopped while armed.

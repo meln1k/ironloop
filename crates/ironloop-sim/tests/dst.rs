@@ -127,7 +127,7 @@ fn matched_imu_mounting_does_not_change_the_motors() {
     // The sensor clips asymmetrically (-32768..32767 LSB), so mountings
     // differ by one LSB once it saturates; compare flights that don't.
     let mut checked = 0;
-    for sc in seeds_where(|s| s.imu.mount == Cw0 && s.fc.imu_alignment == Cw0 && !imu_fault(s), 12) {
+    for sc in seeds_where(|s| s.imu.mount == Cw0 && s.fc.imu_alignment == Cw0 && !imu_fault(s) && s.imu.axis_sign == [1.0; 3], 12) {
         let (base, clipped) = motors(sc.clone());
         if clipped || checked == 3 {
             continue;
@@ -199,7 +199,7 @@ fn sitting_at_part_throttle_does_not_prove_a_build_flies() {
     for thr in [0.3, 0.4] {
         for sit in [0.7, 1.2, 2.0] {
             let mut sc = Scenario::manual(0);
-            sc.motors_swapped = true;
+            sc.motor_wiring = [1, 0, 2, 3];
             let mut sim = Sim::new(sc);
             let mut armed_at = None;
             while sim.t_us < 12_000_000 {
@@ -258,4 +258,48 @@ fn an_inverted_power_dive_and_hands_off_fall_never_disarms_in_the_air() {
         }
     }
     assert!(phase >= 5, "the flight plan did not finish (phase {phase})");
+}
+
+/// An IMU axis read with the wrong sign is a mirror image, which no
+/// `ImuAlignment` describes, so a mount check cannot catch it. A flipped x
+/// or y axis arms and pushes the wrong way on roll or pitch; runaway
+/// detection must stop it. A flipped z axis (alone, or with y: the chip
+/// upside down) reads upside down and must never arm.
+#[test]
+fn a_flipped_imu_axis_never_flies() {
+    let mut failures = Vec::new();
+    for mode in [FlightMode::Angle, FlightMode::Acro] {
+        for (signs, arms) in [([-1.0, 1.0, 1.0], true), ([1.0, -1.0, 1.0], true), ([1.0, 1.0, -1.0], false), ([1.0, -1.0, -1.0], false)] {
+            let mut sc = Scenario::nominal(7, mode);
+            sc.imu.axis_sign = signs;
+            let r = run_scenario(sc);
+            let judged = r.stats.live.get("runaway_stops").is_some_and(|&n| n > 0);
+            if !r.violations.is_empty() || (r.stats.arms > 0) != arms || (arms && !judged) || r.stats.max_alt >= 1.0 {
+                failures.push(format!("{mode:?} {signs:?}: arms {} judged {judged} alt {:.1} {:?}", r.stats.arms, r.stats.max_alt, r.violations));
+            }
+        }
+    }
+    assert!(failures.is_empty(), "{failures:#?}");
+}
+
+/// Motors in the wrong order push roll or pitch the wrong way; motors that
+/// all spin the wrong way push yaw the wrong way. Neither may fly off:
+/// runaway detection must stop them.
+#[test]
+fn miswired_or_reversed_motors_never_fly() {
+    let mut failures = Vec::new();
+    let wirings = [[1, 0, 2, 3], [2, 1, 0, 3], [3, 1, 2, 0], [0, 2, 1, 3], [0, 3, 2, 1], [0, 1, 3, 2], [2, 0, 3, 1], [0, 1, 2, 3]];
+    for mode in [FlightMode::Angle, FlightMode::Acro] {
+        for wiring in wirings {
+            let mut sc = Scenario::nominal(7, mode);
+            sc.motor_wiring = wiring;
+            sc.spin_reversed = wiring == [0, 1, 2, 3];
+            let r = run_scenario(sc);
+            let judged = r.stats.live.get("runaway_stops").is_some_and(|&n| n > 0);
+            if !r.violations.is_empty() || !judged {
+                failures.push(format!("{mode:?} {wiring:?} reversed {}: arms {} judged {judged} alt {:.1} {:?}", wiring == [0, 1, 2, 3], r.stats.arms, r.stats.max_alt, r.violations));
+            }
+        }
+    }
+    assert!(failures.is_empty(), "{failures:#?}");
 }

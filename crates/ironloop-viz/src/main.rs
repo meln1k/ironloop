@@ -509,7 +509,7 @@ fn step_sim(time: Res<Time>, mut app: ResMut<App_>) {
     }
     for i in 0..4 {
         // Shown at a fraction of the true speed so the eye can follow it.
-        let w = app.sim.world.motors[i].omega * app.sim.sc.frame.spin[i];
+        let w = app.sim.world.motors[i].omega * app.sim.world.frame.spin[i];
         app.prop_angle[i] = (app.prop_angle[i] + w * dt * 0.013) % std::f32::consts::TAU;
     }
 }

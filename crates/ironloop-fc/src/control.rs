@@ -16,6 +16,10 @@ pub(crate) const MIX: [[f32; 3]; 4] = [
     [1.0, 1.0, 1.0],
 ];
 
+/// Yaw's output limit as a share of `pid_sum_limit`: yaw gets less, since
+/// its authority comes out of roll and pitch's.
+pub(crate) const YAW_PID_SHARE: f32 = 0.7;
+
 pub(crate) fn rate_curve(r: &Rates, stick: f32) -> f32 {
     let x = stick.clamp(-1.0, 1.0);
     let ax = x.abs();
@@ -134,8 +138,7 @@ pub(crate) fn control(s: &mut State, gyro: Vec3, accel: Vec3, dt: f32, reset: bo
         if integrate {
             integral[i] = (integral[i] + k.i * e[i] * relax[i] * dt).clamp(-cfg.iterm_limit, cfg.iterm_limit);
         }
-        // Yaw gets less: its authority comes out of roll and pitch's.
-        let lim = if i == 2 { cfg.pid_sum_limit * 0.7 } else { cfg.pid_sum_limit };
+        let lim = if i == 2 { cfg.pid_sum_limit * YAW_PID_SHARE } else { cfg.pid_sum_limit };
         out[i] = (k.p * e[i] + integral[i] - k.d * d[i] + k.ff * sp[i]).clamp(-lim, lim);
     }
     s.flight.integral = Vec3::from_array(integral);

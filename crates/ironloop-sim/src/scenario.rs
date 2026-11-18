@@ -34,6 +34,12 @@ pub struct ImuModel {
     /// and accelerometer data lag the motion by about 1/(pi * f) seconds
     /// before the firmware sees them. 0 disables it.
     pub chip_lpf_hz: f32,
+    /// Sign of each sensor axis as the firmware receives it, for gyro and
+    /// accel alike. A -1 is a build mistake no `ImuAlignment` describes: a
+    /// wrong sign in the board's axis mapping (`imu.rs`), or a chip mounted
+    /// upside down (y and z flipped). One flipped axis is a mirror image, so
+    /// it is not any rotation of the chip.
+    pub axis_sign: [f32; 3],
 }
 
 impl Default for ImuModel {
@@ -54,6 +60,7 @@ impl Default for ImuModel {
             accel_range: 16.0 * 9.80665,
             read_delay_us: 110,
             chip_lpf_hz: 250.0,
+            axis_sign: [1.0; 3],
         }
     }
 }
@@ -300,8 +307,12 @@ pub struct Scenario {
     /// Heading the quad starts at (rad); nothing may depend on it.
     pub initial_yaw: f32,
     pub telemetry_loss: f32,
-    /// Motor wires swapped (M1↔M2), a classic build mistake.
-    pub motors_swapped: bool,
+    /// The physical motor each motor output drives, Betaflight order.
+    /// Anything but `[0, 1, 2, 3]` is a wiring or pin-order mistake.
+    pub motor_wiring: [usize; 4],
+    /// Every motor spins the other way from what the mixer assumes (a
+    /// props-in quad on the props-out mixer): yaw pushes the wrong way.
+    pub spin_reversed: bool,
     /// ESCs send bidirectional-DShot eRPM. Some builds run without it
     /// (ESC firmware without bidirectional DShot, or a board build that has
     /// it off), so the firmware must work either way.
@@ -338,7 +349,7 @@ impl Scenario {
     /// The quad cannot be expected to fly normally (wrong build or permanent
     /// hardware fault).
     pub fn unflyable(&self) -> bool {
-        self.motors_swapped
+        self.runaway_build()
             || self.imu.mount != self.fc.imu_alignment
             || self.battery.absent
             || self.faults.iter().any(|f| matches!(f.kind, FaultKind::MotorDead { .. }))
@@ -359,10 +370,17 @@ impl Scenario {
         health
     }
 
-    /// The physical motor that motor output `output` drives: with the wires
-    /// swapped (M1 and M2), output 0 drives motor 1.
+    /// The physical motor that motor output `output` drives.
     pub fn wired(&self, output: usize) -> usize {
-        if self.motors_swapped { [1, 0, 2, 3][output] } else { output }
+        self.motor_wiring[output]
+    }
+
+    /// A build mistake that makes the controller push the wrong way, which
+    /// runaway detection must stop: motors in the wrong order or spinning
+    /// the wrong way, or an IMU axis with the wrong sign. (A flipped z axis
+    /// reads upside down and never arms.)
+    pub fn runaway_build(&self) -> bool {
+        self.motor_wiring != [0, 1, 2, 3] || self.spin_reversed || self.imu.axis_sign != [1.0; 3]
     }
 
     /// A calm, nominal flight: arm, take off, hover, cruise, land.
@@ -420,7 +438,8 @@ impl Scenario {
             ground_tilt: (0.0, 0.0),
             initial_yaw: 0.0,
             telemetry_loss: 0.01,
-            motors_swapped: false,
+            motor_wiring: [0, 1, 2, 3],
+            spin_reversed: false,
             esc_telemetry: true,
             clock_offset_us: 0,
             vbat_gain: 1.0,
@@ -540,14 +559,46 @@ impl Scenario {
             self.imu.mount = ALIGN[(i + 1) % 4];
             tags.push("imu-misaligned".into());
         }
+        // Drawn from its own stream so that adding it left every other
+        // seed's scenario as it was.
+        let mut flip = Rng::fork(self.seed, "imu-axis-flip");
+        if flip.chance(0.04) {
+            // One axis read with the wrong sign, or the chip upside down.
+            let (signs, tag) = *flip.pick(&[
+                ([-1.0, 1.0, 1.0], "imu-x-flipped"),
+                ([1.0, -1.0, 1.0], "imu-y-flipped"),
+                ([1.0, 1.0, -1.0], "imu-z-flipped"),
+                ([1.0, -1.0, -1.0], "imu-upside-down"),
+            ]);
+            self.imu.axis_sign = signs;
+            tags.push(tag.into());
+        }
         if r.chance(0.4) {
             // No bidirectional DShot: older ESC firmware, or turned off.
             self.esc_telemetry = false;
             tags.push("no-telemetry".into());
         }
+        // Like the axis flip, which wiring and the spin come from their own
+        // stream.
+        let mut motors = Rng::fork(self.seed, "motor-wiring");
         if r.chance(0.03) {
-            self.motors_swapped = true;
-            tags.push("motors-swapped".into());
+            // Two motor wires or pins swapped, or the whole motor connector
+            // turned a quarter (each output drives the next motor round).
+            let (wiring, tag) = *motors.pick(&[
+                ([1, 0, 2, 3], "motors-swapped-1-2"),
+                ([2, 1, 0, 3], "motors-swapped-1-3"),
+                ([3, 1, 2, 0], "motors-swapped-1-4"),
+                ([0, 2, 1, 3], "motors-swapped-2-3"),
+                ([0, 3, 2, 1], "motors-swapped-2-4"),
+                ([0, 1, 3, 2], "motors-swapped-3-4"),
+                ([2, 0, 3, 1], "motors-rotated"),
+            ]);
+            self.motor_wiring = wiring;
+            tags.push(tag.into());
+        }
+        if motors.chance(0.03) {
+            self.spin_reversed = true;
+            tags.push("spin-reversed".into());
         }
         if r.chance(0.03) {
             self.battery.absent = true;

@@ -20,7 +20,7 @@ pub static CRASH_STOPS: Property = Property {
 };
 pub static RUNAWAY_STOPS: Property = Property {
     name: "runaway_stops",
-    doc: "A quad with its motors swapped never climbs above 1 m and stops within 5 s of throttle-up.",
+    doc: "A quad with its motors swapped or an IMU axis flipped never climbs above 1 m and stops within 5 s of throttle-up.",
 };
 pub static NO_FLYAWAY: Property = Property {
     name: "no_flyaway",
@@ -86,7 +86,7 @@ impl Protect {
         }
 
         // Runaway: a quad that cannot fly must not be allowed to keep trying.
-        if sc.motors_swapped && after.armed && link.last_rc_throttle > 1300 {
+        if sc.runaway_build() && after.armed && link.last_rc_throttle > 1300 {
             v.live(&RUNAWAY_STOPS);
             let since = *self.runaway_since.get_or_insert(t);
             if t - since > REQ_RUNAWAY_STOP_US || alt > REQ_RUNAWAY_ALT {

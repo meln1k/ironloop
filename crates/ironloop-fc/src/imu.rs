@@ -191,6 +191,8 @@ fn calibrate(s: &mut State, g: Vec3, a: Vec3, fx: &mut Out) {
 /// quad by hand or with turtle mode resets it again.
 const GROUND_RESET_QUIET_US: u64 = 250_000;
 const GROUND_RESET_US: u64 = 500_000;
+/// Still this long (µs), the ground reset has finished.
+pub(crate) const GROUND_SETTLED_US: u64 = GROUND_RESET_QUIET_US + GROUND_RESET_US;
 
 /// Mahony complementary filter.
 fn estimate_attitude(s: &mut State, gyro: Vec3, accel: Vec3, dt: f32) {

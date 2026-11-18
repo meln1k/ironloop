@@ -12,6 +12,14 @@ const CRASH_BLOCKED_GAP_US: u64 = 500_000;
 /// fall faster than this (m/s) rolled over on the ground.
 const TIPPED_FALL_MAX: f32 = 2.0;
 
+/// How long (µs) a gyro clipped at its range, with the PIDs pushing
+/// against the clipped rate, counts as a runaway.
+const CLIPPED_RUNAWAY_US: u64 = 500_000;
+
+/// How long (µs) the yaw output at its limit against the yaw rate counts as
+/// a runaway.
+const YAW_RUNAWAY_US: u64 = 250_000;
+
 /// Climb (m/s, from `vz_est`) that shows an upright quad left the ground.
 const LIFTOFF_CLIMB: f32 = 0.5;
 
@@ -36,8 +44,31 @@ pub(crate) fn runaway_and_crash(s: &mut State, gyro: Vec3, accel: Vec3, throttle
         let pushed_back = s.ang_accel.x * p.x + s.ang_accel.y * p.y < 0.0;
         let runaway = pid_high && spinning && (pushed_back || !flown);
         let runaway_for = held_for(&mut s.flight.runaway_since_us, runaway, now);
-        if runaway && runaway_for >= cfg.runaway_us {
+        // Yaw on its own, at its lower output limit: all motors spinning the
+        // wrong way (props in on a props-out mixer), or two motors of
+        // opposite spin swapped, push yaw the wrong way while roll and pitch
+        // may tumble every which way. Its acceleration is too noisy to judge
+        // (vibration at full throttle, every bounce of a tumble), but a
+        // build that flies stops even a full-stick yaw within about 0.1 s
+        // once the yaw output is at its limit against it.
+        let yaw_lim = cfg.pid_sum_limit * crate::control::YAW_PID_SHARE * cfg.runaway_pid_frac;
+        let yaw_high = p.z.abs() >= yaw_lim;
+        let yaw_opposed = yaw_high && gyro.z * p.z < 0.0 && gyro.z.abs() > cfg.runaway_gyro;
+        let yaw_opposed_for = held_for(&mut s.flight.yaw_opposed_since_us, yaw_opposed, now);
+        // A gyro clipped at its range reads a flat rate, so whether the
+        // frame follows the push cannot be seen (an IMU axis with the wrong
+        // sign spins it up past the range at once). Full stick asks for a
+        // third of the range, so a build that flies turns back out of the
+        // clip quickly; a clip the PIDs push against for longer than a
+        // tumble on the ground holds it is a runaway.
+        let clipped = (pid_high || yaw_high) && s.gyro_saturated && gyro.dot(p) < 0.0;
+        let clipped_for = held_for(&mut s.flight.clipped_since_us, clipped, now);
+        if (runaway && runaway_for >= cfg.runaway_us)
+            || (yaw_opposed && yaw_opposed_for >= YAW_RUNAWAY_US)
+            || (clipped && clipped_for >= CLIPPED_RUNAWAY_US)
+        {
             disarm(s, DisarmReason::RunawayTakeoff, fx);
+            s.runaway_tripped = true;
             return;
         }
         if !runaway {

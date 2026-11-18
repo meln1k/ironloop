@@ -97,7 +97,11 @@ pub struct Sim {
 
 impl Sim {
     pub fn new(sc: Scenario) -> Self {
-        let mut world = World::new(sc.frame.clone(), sc.battery.clone(), sc.wind.clone());
+        let mut frame = sc.frame.clone();
+        if sc.spin_reversed {
+            frame.spin = frame.spin.map(|d| -d);
+        }
+        let mut world = World::new(frame, sc.battery.clone(), sc.wind.clone());
         let (r, p) = sc.ground_tilt;
         world.body.att = ironloop_fc::math::Quat::from_euler(r, p, sc.initial_yaw);
         if r != 0.0 || p != 0.0 {
@@ -419,8 +423,10 @@ impl Sim {
             let q = |x: f32| (x.clamp(-range, range - lsb) / lsb).round() * lsb;
             [q(v.x), q(v.y), q(v.z)]
         };
-        let mut g = quant(to_sensor(gyro), imu.gyro_range);
-        let mut a = quant(to_sensor(accel), imu.accel_range);
+        let [sx, sy, sz] = imu.axis_sign;
+        let flip = |v: Vec3| Vec3::new(v.x * sx, v.y * sy, v.z * sz);
+        let mut g = quant(flip(to_sensor(gyro)), imu.gyro_range);
+        let mut a = quant(flip(to_sensor(accel)), imu.accel_range);
 
         if let Some(p) = self.active_fault(|k| match *k {
             FaultKind::ImuGarbage { p } => Some(p),
