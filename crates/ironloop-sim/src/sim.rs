@@ -224,8 +224,13 @@ impl Sim {
         self.world.wind.mean = self.sc.wind.mean;
     }
 
-    fn fault_active(&self, pred: impl Fn(&FaultKind) -> bool) -> Option<Fault> {
-        self.sc.faults.iter().copied().find(|f| f.active(self.t_us) && pred(&f.kind))
+    /// The first active fault `pick` accepts, as what `pick` takes from it.
+    fn active_fault<T>(&self, pick: impl Fn(&FaultKind) -> Option<T>) -> Option<T> {
+        self.sc.faults.iter().filter(|f| f.active(self.t_us)).find_map(|f| pick(&f.kind))
+    }
+
+    fn fault_active(&self, kind: FaultKind) -> bool {
+        self.active_fault(|k| (*k == kind).then_some(())).is_some()
     }
 
     /// Runs the whole scenario.
@@ -275,11 +280,11 @@ impl Sim {
             }
             b.vel = Vec3::ZERO;
         }
-        for (i, f) in self.sc.faults.iter().enumerate() {
+        for f in &self.sc.faults {
             let active = f.active(t);
             match f.kind {
                 FaultKind::Kick { torque } | FaultKind::Impact { torque } if active => {
-                    self.world.kick = Some((f.at_us + f.dur_us, torque));
+                    self.world.kick = Some((f.end_us(), torque));
                 }
                 FaultKind::MotorDesync { motor } => {
                     let m = &mut self.world.motors[motor as usize];
@@ -301,7 +306,6 @@ impl Sim {
                 FaultKind::WindShift { wind: w } if active => wind = w,
                 _ => {}
             }
-            let _ = i;
         }
         self.world.wind.mean = wind;
     }
@@ -329,11 +333,11 @@ impl Sim {
                 self.schedule(t + BATTERY_US, Ev::Battery);
             }
             Ev::Telemetry => {
-                let lost_all = self.fault_active(|k| matches!(k, FaultKind::TelemetryLoss)).is_some();
+                let lost_all = self.fault_active(FaultKind::TelemetryLoss);
                 let mut erpm = [None; 4];
                 for (i, e) in erpm.iter_mut().enumerate() {
                     // Each ESC reports the motor it drives, wherever that is.
-                    let m = if self.sc.motors_swapped { [1, 0, 2, 3][i] } else { i };
+                    let m = self.sc.wired(i);
                     let lost = self.rng_esc.chance(self.sc.telemetry_loss);
                     if !lost_all && !lost && self.world.motors[m].command != 0 {
                         // The ESC measures the commutation period and sends
@@ -370,8 +374,8 @@ impl Sim {
             }
             Ev::ApplyMotors => {
                 if let Some(cmd) = self.pending_motors.pop_front() {
-                    let cmd = if self.sc.motors_swapped { [cmd[1], cmd[0], cmd[2], cmd[3]] } else { cmd };
-                    for (m, c) in self.world.motors.iter_mut().zip(cmd) {
+                    for (i, c) in cmd.into_iter().enumerate() {
+                        let m = &mut self.world.motors[self.sc.wired(i)];
                         m.command = c;
                         m.last_frame_us = t;
                     }
@@ -386,18 +390,18 @@ impl Sim {
         let period = 1e6 / imu.odr_hz as f64;
         self.imu_next_ideal += period;
         let jitter = self
-            .fault_active(|k| matches!(k, FaultKind::TimingJitter { .. }))
-            .map_or(imu.jitter_us, |f| match f.kind {
-                FaultKind::TimingJitter { jitter_us } => jitter_us,
-                _ => unreachable!(),
-            });
+            .active_fault(|k| match *k {
+                FaultKind::TimingJitter { jitter_us } => Some(jitter_us),
+                _ => None,
+            })
+            .unwrap_or(imu.jitter_us);
         let next = (self.imu_next_ideal as u64 + self.rng_imu.range_u64(0, jitter + 1)).max(t + 1);
         self.schedule(next, Ev::Imu);
 
-        if self.fault_active(|k| matches!(k, FaultKind::ImuDropout)).is_some() {
+        if self.fault_active(FaultKind::ImuDropout) {
             return;
         }
-        if self.fault_active(|k| matches!(k, FaultKind::ImuStuck)).is_some() {
+        if self.fault_active(FaultKind::ImuStuck) {
             if let Some((g, a)) = self.last_imu_raw {
                 self.deliver_imu(EventKind::Imu { gyro: g, accel: a });
                 return;
@@ -451,8 +455,10 @@ impl Sim {
         let mut g = quant(to_sensor(gyro), imu.gyro_range);
         let mut a = quant(to_sensor(accel), imu.accel_range);
 
-        if let Some(f) = self.fault_active(|k| matches!(k, FaultKind::ImuGarbage { .. })) {
-            let FaultKind::ImuGarbage { p } = f.kind else { unreachable!() };
+        if let Some(p) = self.active_fault(|k| match *k {
+            FaultKind::ImuGarbage { p } => Some(p),
+            _ => None,
+        }) {
             let r = &mut self.rng_imu;
             if r.chance(p) {
                 match r.range_u64(0, 10) {
@@ -478,7 +484,7 @@ impl Sim {
     }
 
     fn data_ready(&mut self, stamp: u64, kind: EventKind) {
-        if self.fault_active(|k| matches!(k, FaultKind::FcStall)).is_some() {
+        if self.fault_active(FaultKind::FcStall) {
             self.stalled_imu = Some((stamp, kind));
         } else if self.imu_read.is_some() {
             self.imu_waiting = Some((stamp, kind));
@@ -510,12 +516,14 @@ impl Sim {
                 self.deliver(EventKind::Command(ironloop_fc::Command::RebootToBootloader));
             }
         }
-        if self.fault_active(|k| matches!(k, FaultKind::RcLoss)).is_some() {
+        if self.fault_active(FaultKind::RcLoss) {
             return;
         }
         let mut channels = sticks.channels();
-        if let Some(f) = self.fault_active(|k| matches!(k, FaultKind::RcGlitch { .. })) {
-            let FaultKind::RcGlitch { p } = f.kind else { unreachable!() };
+        if let Some(p) = self.active_fault(|k| match *k {
+            FaultKind::RcGlitch { p } => Some(p),
+            _ => None,
+        }) {
             if self.rng_rc.chance(p) {
                 if self.rng_rc.chance(0.5) {
                     let i = self.rng_rc.range_u64(0, RC_CHANNELS as u64) as usize;
@@ -539,7 +547,7 @@ impl Sim {
     /// Passes an event stamped at `stamp` to the board's control task.
     fn deliver_at(&mut self, stamp: u64, kind: EventKind) {
         let is_imu = matches!(kind, EventKind::Imu { .. });
-        if self.fault_active(|k| matches!(k, FaultKind::FcStall)).is_some() {
+        if self.fault_active(FaultKind::FcStall) {
             match kind {
                 EventKind::Imu { .. } => self.stalled_imu = Some((stamp, kind)),
                 // The control task makes its own ticks; a stalled one makes none.
@@ -561,8 +569,10 @@ impl Sim {
             self.held.push((stamp, kind));
             return;
         }
-        if let Some(f) = self.fault_active(|k| matches!(k, FaultKind::EventDrop { .. })) {
-            let FaultKind::EventDrop { p } = f.kind else { unreachable!() };
+        if let Some(p) = self.active_fault(|k| match *k {
+            FaultKind::EventDrop { p } => Some(p),
+            _ => None,
+        }) {
             if self.rng_board.chance(p) {
                 return;
             }

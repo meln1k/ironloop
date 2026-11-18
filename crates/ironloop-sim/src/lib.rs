@@ -15,7 +15,7 @@ pub mod scenario;
 pub mod sim;
 
 pub use monitor::{Monitor, Violation};
-pub use scenario::{Action, Fault, FaultKind, Scenario};
+pub use scenario::{Action, FOREVER, Fault, FaultKind, Scenario};
 pub use sim::{Sim, Sticks};
 
 /// Result of one seeded run.

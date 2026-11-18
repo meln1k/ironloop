@@ -191,9 +191,17 @@ pub struct Fault {
     pub kind: FaultKind,
 }
 
+/// The duration of a fault that never ends (a dead motor, a lost link).
+pub const FOREVER: u64 = u64::MAX;
+
 impl Fault {
+    /// When the fault ends (never, for a [`FOREVER`] fault).
+    pub fn end_us(&self) -> u64 {
+        self.at_us.saturating_add(self.dur_us)
+    }
+
     pub fn active(&self, t: u64) -> bool {
-        t >= self.at_us && t < self.at_us + self.dur_us
+        t >= self.at_us && t < self.end_us()
     }
 }
 
@@ -328,6 +336,12 @@ impl Scenario {
             || self.faults.iter().any(|f| matches!(f.kind, FaultKind::MotorDead { .. }))
     }
 
+    /// The physical motor that motor output `output` drives: with the wires
+    /// swapped (M1 and M2), output 0 drives motor 1.
+    pub fn wired(&self, output: usize) -> usize {
+        if self.motors_swapped { [1, 0, 2, 3][output] } else { output }
+    }
+
     /// A calm, nominal flight: arm, take off, hover, cruise, land.
     pub fn nominal(seed: u64, mode: FlightMode) -> Self {
         let s = 1_000_000;
@@ -349,7 +363,7 @@ impl Scenario {
     /// except those injected live, mild sensor imperfections.
     pub fn manual(seed: u64) -> Self {
         let mut sc = Scenario::base(seed, "manual".into());
-        sc.duration_us = u64::MAX / 4;
+        sc.duration_us = FOREVER;
         sc.battery.soc = 1.0;
         sc.battery.volts = Battery::ocv(1.0);
         sc.imu.gyro_bias = Vec3::new(0.01, -0.02, 0.005);
@@ -636,8 +650,8 @@ impl Scenario {
                     (FaultKind::Kick { torque: axis * k }, r.range_u64(5_000, 40_000), "kick")
                 }
                 4 => (FaultKind::MotorDesync { motor }, r.range_u64(20_000, 300_000), "desync"),
-                5 if r.chance(0.3) => (FaultKind::MotorDead { motor }, u64::MAX / 4, "motor-dead"),
-                6 => (FaultKind::MotorDegraded { motor, factor: r.range(0.6, 0.9) }, u64::MAX / 4, "motor-degraded"),
+                5 if r.chance(0.3) => (FaultKind::MotorDead { motor }, FOREVER, "motor-dead"),
+                6 => (FaultKind::MotorDegraded { motor, factor: r.range(0.6, 0.9) }, FOREVER, "motor-degraded"),
                 7 | 8 => (FaultKind::RcLoss, *r.pick(&[30_000, 80_000, 150_000, 600_000, 1_500_000, 8_000_000]), "rc-loss"),
                 9 => (FaultKind::RcGlitch { p: r.range(0.01, 0.3) }, r.range_u64(200_000, 3_000_000), "rc-glitch"),
                 10 => (FaultKind::TelemetryLoss, r.range_u64(100_000, 2_000_000), "telemetry-loss"),

@@ -54,6 +54,9 @@ pub const REQ_IMU_TOLERATE_US: u64 = 10_000;
 pub const REQ_ESC_FEED_US: u64 = 5_000;
 /// Arming is never allowed tilted further than this (rad).
 pub const REQ_ARM_TILT: f32 = 33.0 * core::f32::consts::PI / 180.0;
+/// Tilted past this (rad) on the ground, the quad has tipped over: lying
+/// after a crash, not standing on its ducts.
+pub const REQ_TIPPED_OVER: f32 = 60f32.to_radians();
 /// Angle mode never tilts further than this (rad).
 pub const REQ_ANGLE_TILT: f32 = 75.0 * core::f32::consts::PI / 180.0;
 /// Estimated tilt stays within this of the truth in flight (deg).
@@ -227,12 +230,6 @@ pub struct Stats {
     pub live: BTreeMap<&'static str, u64>,
     /// Kinds of the faults that started while the quad was airborne.
     pub faults_in_flight: Vec<&'static str>,
-}
-
-/// The physical motor that motor output `i` drives (the build may have two
-/// motor wires swapped, as the simulator wires them).
-fn wired(sc: &Scenario, i: usize) -> usize {
-    if sc.motors_swapped { [1, 0, 2, 3][i] } else { i }
 }
 
 #[derive(Clone, Debug)]
@@ -409,7 +406,7 @@ impl Monitor {
             self.below_warn_v_us = Some(t);
         }
         for i in 0..4 {
-            if world.motors[wired(sc, i)].health != MotorHealth::Ok {
+            if world.motors[sc.wired(i)].health != MotorHealth::Ok {
                 self.motor_bad_us[i] = Some(t);
             }
         }
@@ -545,7 +542,7 @@ impl Monitor {
                 Some(DisarmReason::Failsafe) => before.failsafe != FailsafeStage::None,
                 Some(DisarmReason::ImuFailure) => imu_stale,
                 // Stopping a quad that cannot fly (dead motor) is no false alarm.
-                Some(DisarmReason::Crash) => (alt < 0.3 && true_tilt > 60f32.to_radians()) || sc.unflyable(),
+                Some(DisarmReason::Crash) => (alt < 0.3 && true_tilt > REQ_TIPPED_OVER) || sc.unflyable(),
                 Some(DisarmReason::RunawayTakeoff) => sc.unflyable(),
                 None => false,
             };
@@ -728,7 +725,7 @@ impl Monitor {
                 }
             }
             // Upright; a quad that tipped over landing is crash_stops' case.
-            if world.body.on_ground && alt < 0.1 && true_tilt < 60f32.to_radians() {
+            if world.body.on_ground && alt < 0.1 && true_tilt < REQ_TIPPED_OVER {
                 self.live("failsafe_disarms_on_touchdown");
                 let landed = *self.landed_since.get_or_insert(t);
                 if t - landed > REQ_FAILSAFE_TOUCHDOWN_DISARM_US {
@@ -773,7 +770,7 @@ impl Monitor {
                 let stalled = sc
                     .faults
                     .iter()
-                    .any(|f| matches!(f.kind, FaultKind::FcStall) && f.at_us <= t && f.at_us + f.dur_us + 1_000 >= last);
+                    .any(|f| matches!(f.kind, FaultKind::FcStall) && f.at_us <= t && f.end_us().saturating_add(1_000) >= last);
                 if t - last > REQ_ESC_FEED_US && !stalled {
                     self.fail(t, "esc_fed", format!("{} ms without a motor command", (t - last) / 1000));
                 }
@@ -784,7 +781,7 @@ impl Monitor {
         // still spin flat or skid).
         let w_world = world.body.att.rotate(world.body.omega);
         let stuck = Vec3::new(w_world.x, w_world.y, 0.0).norm() < 1.0;
-        if after.armed && world.body.on_ground && true_tilt > 60f32.to_radians() && stuck {
+        if after.armed && world.body.on_ground && true_tilt > REQ_TIPPED_OVER && stuck {
             self.live("crash_stops");
             let since = *self.inverted_since.get_or_insert(t);
             if t - since > REQ_CRASH_STOP_US {
@@ -837,7 +834,7 @@ impl Monitor {
         let telemetry_ok =
             sc.esc_telemetry && !sc.faults.iter().any(|f| f.active(t) && matches!(f.kind, FaultKind::TelemetryLoss));
         for i in 0..4 {
-            let stalled = matches!(world.motors[wired(sc, i)].health, MotorHealth::Dead | MotorHealth::Desync);
+            let stalled = matches!(world.motors[sc.wired(i)].health, MotorHealth::Dead | MotorHealth::Desync);
             let hard = after.motors[i] > DSHOT_MIN + 800;
             if after.armed && stalled && hard && telemetry_ok {
                 self.live("motor_fault_reported");

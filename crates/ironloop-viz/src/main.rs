@@ -11,7 +11,7 @@ use bevy::prelude::*;
 use bevy::window::WindowPlugin;
 use ironloop_fc::math::{Quat as FQuat, Vec3 as FVec3};
 use ironloop_fc::{ArmBlockers, BatteryLevel, FailsafeStage, FlightMode, Notice};
-use ironloop_sim::{FaultKind, Scenario, Sim, Sticks};
+use ironloop_sim::{FOREVER, FaultKind, Scenario, Sim, Sticks};
 
 fn main() {
     App::new()
@@ -307,7 +307,7 @@ fn input(
     if keys.just_pressed(KeyCode::Digit1) {
         app.rc_loss_on = !app.rc_loss_on;
         if app.rc_loss_on {
-            sim.inject(FaultKind::RcLoss, u64::MAX / 4);
+            sim.inject(FaultKind::RcLoss, FOREVER);
         } else {
             let t = sim.t_us;
             for f in &mut sim.sc.faults {
@@ -321,7 +321,7 @@ fn input(
         sim.inject(FaultKind::MotorDesync { motor }, 300_000);
     }
     if keys.just_pressed(KeyCode::Digit3) {
-        sim.inject(FaultKind::MotorDead { motor }, u64::MAX / 4);
+        sim.inject(FaultKind::MotorDead { motor }, FOREVER);
     }
     if keys.just_pressed(KeyCode::Digit4) {
         sim.inject(FaultKind::ImuDropout, 100_000);
