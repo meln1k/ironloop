@@ -32,11 +32,13 @@ fn generated_scenarios_hold_every_property_and_replay_identically() {
 /// which the attitude estimate's error once made look like rolling.
 /// Seed 445 loses a motor, sits on the ground, and is flipped over where it
 /// stands by the pilot with no impact, which once never counted as lying.
-/// Seeds 519 and 415 land by failsafe from 10-13 m, which once sped up past
+/// Seeds 519 and 70 land by failsafe from about 10 m, which once sped up past
 /// 2.5 m/s: the brake stopped at 98% of hover, and the speed estimate
-/// started from zero at link loss although the quad was already moving.
-/// Seeds 109 and 257 saturate the gyro hitting the ground and punch out,
-/// which once left the tilt estimate 20-27 degrees off for seconds. Seed
+/// started from zero at link loss although the quad was already moving
+/// (seed 70 touches down at 2.7 m/s with both put back).
+/// Seeds 688 and 257 saturate the gyro and fly on, which once left the tilt
+/// estimate 20-27 degrees off for seconds (seed 688 is off by 104 degrees
+/// without the fast re-convergence after saturation). Seed
 /// 209 rolls hard at 1 g soon after one, which a recovery that believed
 /// any 1 g reading once took for level.
 /// Seeds 741, 1360 and 1979 land by failsafe from 13-16 m and once touched
@@ -45,7 +47,7 @@ fn generated_scenarios_hold_every_property_and_replay_identically() {
 /// below where sag compensation is capped, could not hold even that.
 #[test]
 fn regression_seeds_hold_every_property() {
-    for seed in [1531, 822, 3007, 6875, 3934, 838, 88, 445, 519, 415, 109, 257, 209, 741, 1360, 1979] {
+    for seed in [1531, 822, 3007, 6875, 3934, 838, 88, 445, 519, 70, 688, 257, 209, 741, 1360, 1979] {
         let r = run_seed(seed);
         assert!(r.violations.is_empty(), "seed {seed} [{}]: {:?}", r.name, r.violations);
     }
