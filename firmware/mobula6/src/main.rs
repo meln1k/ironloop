@@ -29,6 +29,7 @@ mod control;
 mod dfu;
 mod dshot;
 mod imu;
+mod reset;
 mod usb;
 
 use control::send;
@@ -139,13 +140,14 @@ static CRSF_DMA_BUF: StaticCell<[u8; 256]> = StaticCell::new();
 
 #[panic_handler]
 fn panic(_: &core::panic::PanicInfo) -> ! {
-    cortex_m::peripheral::SCB::sys_reset()
+    reset::panic_reset()
 }
 
 #[cortex_m_rt::entry]
 fn main() -> ! {
     // First, before the clocks or any peripheral are touched.
     dfu::jump_if_requested();
+    reset::latch();
     static EXECUTOR: StaticCell<Executor> = StaticCell::new();
     EXECUTOR.init(Executor::new()).run(|spawner| spawner.spawn(init(spawner).unwrap()))
 }
@@ -176,6 +178,7 @@ async fn init(spawner: Spawner) {
     // Without an IMU no `Imu` events arrive, so the firmware reports the
     // IMU arming blocker and never spins the motors.
     let imu = imu::Imu::init(spi, cs).await.ok();
+    control::STATS.imu_chip.store(imu.as_ref().map_or(0, |i| i.chip as u8 + 1), core::sync::atomic::Ordering::Relaxed);
     // The board knows its sensor's ranges; the firmware's defaults do not.
     let config = Config {
         gyro_range: imu::GYRO_RANGE,

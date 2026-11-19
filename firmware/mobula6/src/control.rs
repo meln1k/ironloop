@@ -10,11 +10,13 @@
 //!   a dead data-ready line gives ticks and no `Imu` events, so the
 //!   firmware's IMU timeout blocks arming or disarms.
 //!
-//! `STATS` counts samples, losses, and the cycle cost of `step`. Every
-//! 100 ticks the loop also publishes the firmware's `Status` in `STATUS`;
-//! `usb` prints both on the USB serial port.
+//! `STATS` counts samples, losses, and the cycle cost of `step`, and keeps
+//! the newest RC channels and battery current. Every 100 ticks the loop
+//! also publishes the firmware's `Status` in `STATUS`, and it queues the
+//! firmware's notices in `NOTICES`; `usb` prints them on the USB serial
+//! port.
 
-use core::sync::atomic::{AtomicU32, Ordering::Relaxed};
+use core::sync::atomic::{AtomicU8, AtomicU16, AtomicU32, Ordering::Relaxed};
 
 use cortex_m::peripheral::DWT;
 use embassy_futures::select::{Either3, select3};
@@ -28,7 +30,7 @@ use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::Channel;
 use embassy_sync::signal::Signal;
 use embassy_time::{Duration, Instant, Timer};
-use ironloop_fc::{Config, Effect, Event, EventKind, State, Status, step};
+use ironloop_fc::{Config, Effect, Event, EventKind, Notice, RC_CHANNELS, State, Status, step};
 
 use crate::{dshot, imu};
 
@@ -44,6 +46,11 @@ static DRDY: Signal<CriticalSectionRawMutex, u64> = Signal::new();
 
 /// The firmware's latest `Status`, for the USB status line.
 pub static STATUS: Signal<CriticalSectionRawMutex, Status> = Signal::new();
+
+/// The firmware's notices (why it disarmed, refused to arm, reported a
+/// motor or the battery) with their event time in µs, newest kept when
+/// full, for the USB port.
+pub static NOTICES: Channel<CriticalSectionRawMutex, (u64, Notice), 16> = Channel::new();
 
 /// Bench counters, printed on the USB serial port by `usb` (SWD is not
 /// reachable on this board).
@@ -62,6 +69,14 @@ pub struct Stats {
     pub step_cycles_max: AtomicU32,
     /// The newest valid eRPM reply per motor output (0 before the first).
     pub erpm: [AtomicU32; 4],
+    /// The newest RC frame's channels, as decoded (µs).
+    pub rc: [AtomicU16; RC_CHANNELS],
+    /// The newest battery current reading (A, `f32` bits).
+    pub amps: AtomicU32,
+    /// Which IMU was found: 0 none, 1 BMI270, 2 ICM-42688.
+    pub imu_chip: AtomicU8,
+    /// Notices dropped (the oldest) because `NOTICES` was full.
+    pub notices_dropped: AtomicU32,
 }
 
 #[unsafe(no_mangle)]
@@ -73,6 +88,10 @@ pub static STATS: Stats = Stats {
     step_cycles_last: AtomicU32::new(0),
     step_cycles_max: AtomicU32::new(0),
     erpm: [const { AtomicU32::new(0) }; 4],
+    rc: [const { AtomicU16::new(0) }; RC_CHANNELS],
+    amps: AtomicU32::new(0),
+    imu_chip: AtomicU8::new(0),
+    notices_dropped: AtomicU32::new(0),
 };
 
 fn now_us() -> u64 {
@@ -170,6 +189,15 @@ pub async fn control_task(
 /// Steps the firmware on one event and applies its effects.
 fn run(state: &mut State, event: &Event, motors: &mut dshot::Dshot, led: &mut Output<'static>, beeper: &mut Output<'static>) {
     let start = DWT::cycle_count();
+    match event.kind {
+        EventKind::Rc { channels } => {
+            for (stat, c) in STATS.rc.iter().zip(channels) {
+                stat.store(c, Relaxed);
+            }
+        }
+        EventKind::Battery { amps, .. } => STATS.amps.store(amps.to_bits(), Relaxed),
+        _ => {}
+    }
     let effects = step(state, event);
     // Only the last motor command of a step goes out: an earlier one
     // would be superseded within microseconds anyway.
@@ -180,7 +208,15 @@ fn run(state: &mut State, event: &Event, motors: &mut dshot::Dshot, led: &mut Ou
             // Status LED on PC13 is active-low.
             Effect::Led(on) => led.set_level(if on { Level::Low } else { Level::High }),
             Effect::Beeper(on) => beeper.set_level(Level::from(on)),
-            Effect::Notice(_) => {}
+            Effect::Notice(n) => {
+                let note = (event.t_us, n);
+                if NOTICES.try_send(note).is_err() {
+                    // Keep the newest: drop the oldest instead.
+                    let _ = NOTICES.try_receive();
+                    let _ = NOTICES.try_send(note);
+                    STATS.notices_dropped.fetch_add(1, Relaxed);
+                }
+            }
             Effect::RebootToBootloader => {
                 // The stop frame goes out whole before the reset.
                 motors.wait_idle();
