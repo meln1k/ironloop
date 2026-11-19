@@ -9,7 +9,7 @@ use std::cmp::Reverse;
 use std::collections::{BinaryHeap, VecDeque};
 
 use ironloop_fc::math::Vec3;
-use ironloop_fc::proto::{decode_erpm_reply, erpm_reply};
+use ironloop_fc::proto::{CRSF_RC_CHANNELS_PACKED, CrsfParser, crsf_crc8, crsf_to_us, decode_erpm_reply, erpm_reply};
 use ironloop_fc::{
     Effect, Event, EventKind, ImuAlignment, Notice, RC_CHANNELS, State, Status, step,
 };
@@ -35,8 +35,8 @@ enum Ev {
     Telemetry,
     Tick,
     ApplyMotors,
-    /// An IMU sample finishes its SPI read and reaches the event queue.
-    ImuDeliver,
+    /// The control task finishes what it was doing.
+    TaskFree,
     /// The one-shot fault at this index in the scenario happens.
     Fault(usize),
 }
@@ -51,22 +51,21 @@ pub struct Sim {
     queue: BinaryHeap<Reverse<(u64, u64, Ev)>>,
     seq: u64,
     pending_motors: VecDeque<[u16; 4]>,
-    /// The board's control task reads one IMU sample at a time: the sample
-    /// being read (stamped at data-ready), and the newest data-ready that
-    /// came during that read. An older unread one is lost.
-    imu_read: Option<(u64, EventKind)>,
-    imu_waiting: Option<(u64, EventKind)>,
-    /// Events that arrived during an IMU read; the control task steps them
-    /// after the sample.
-    held: Vec<(u64, EventKind)>,
-    /// Events held in the board's 32-deep queue while the firmware stalls,
-    /// and the newest data-ready from the stall.
-    stalled: Vec<(u64, EventKind)>,
-    stalled_imu: Option<(u64, EventKind)>,
+    task: Task,
+    /// IMU samples lost because the control task had not read the one
+    /// before (the board's `drdy_missed`).
+    pub imu_missed: u64,
+    /// The longest the control task was busy with one event, µs (the
+    /// board's `step_cycles_max`, plus the SPI read for a sample).
+    pub task_busy_max_us: u64,
     rng_board: Rng,
+    /// Its own stream for the CPU time each step takes.
+    rng_cpu: Rng,
     imu_next_ideal: f64,
     rng_imu: Rng,
     rng_rc: Rng,
+    /// The board's CRSF parser, fed the receiver's bytes.
+    crsf: CrsfParser,
     /// The virtual pilot's own stream, so modelling the link differently
     /// does not change how the pilot flies.
     rng_pilot: Rng,
@@ -99,6 +98,8 @@ pub struct Sim {
     pub beeper: bool,
     pub events_delivered: u64,
     pub rebooted_to_bootloader: bool,
+    /// Times the receiver browned out.
+    pub rx_brownouts: u32,
 }
 
 impl Sim {
@@ -124,15 +125,15 @@ impl Sim {
             queue: BinaryHeap::new(),
             seq: 0,
             pending_motors: VecDeque::new(),
-            imu_read: None,
-            imu_waiting: None,
-            held: Vec::new(),
-            stalled: Vec::new(),
-            stalled_imu: None,
+            task: Task::default(),
+            imu_missed: 0,
+            task_busy_max_us: 0,
             rng_board: Rng::fork(seed, "board"),
+            rng_cpu: Rng::fork(seed, "cpu"),
             imu_next_ideal: 0.0,
             rng_imu: Rng::fork(seed, "imu"),
             rng_rc: Rng::fork(seed, "rc"),
+            crsf: CrsfParser::default(),
             rng_pilot: Rng::fork(seed, "pilot"),
             rng_env: Rng::fork(seed, "env"),
             rng_esc: Rng::fork(seed, "esc"),
@@ -154,6 +155,7 @@ impl Sim {
             beeper: false,
             events_delivered: 0,
             rebooted_to_bootloader: false,
+            rx_brownouts: 0,
             sc,
         };
         // Boot order is staggered like real peripherals coming up.
@@ -246,7 +248,25 @@ impl Sim {
             self.physics_us += PHYSICS_DT_US;
             self.apply_world_faults();
             self.world.step(PHYSICS_DT_US as f32 * 1e-6, self.physics_us, &mut self.rng_env);
+            self.check_brownout();
         }
+    }
+
+    /// A sag under the receiver's brownout voltage reboots it: no RC frames
+    /// until it has booted and found the transmitter again, which takes
+    /// 0.5-1.5 s (estimated). The firmware sees a lost link.
+    fn check_brownout(&mut self) {
+        let (t, b) = (self.physics_us, &self.world.battery);
+        if b.absent || b.volts >= self.sc.rx_brownout_v || self.fault_active_at(FaultKind::RcLoss, t) {
+            return;
+        }
+        let dur_us = self.rng_env.range_u64(500_000, 1_500_000);
+        self.sc.faults.push(Fault { at_us: t, dur_us, kind: FaultKind::RcLoss });
+        self.rx_brownouts += 1;
+    }
+
+    fn fault_active_at(&self, kind: FaultKind, t: u64) -> bool {
+        self.sc.faults.iter().any(|f| f.kind == kind && f.active(t))
     }
 
     fn apply_world_faults(&mut self) {
@@ -335,17 +355,7 @@ impl Sim {
                 self.deliver(EventKind::Tick);
                 self.schedule(t + TICK_US, Ev::Tick);
             }
-            Ev::ImuDeliver => {
-                if let Some((stamp, kind)) = self.imu_read.take() {
-                    self.deliver_at(stamp, kind);
-                }
-                for (stamp, kind) in std::mem::take(&mut self.held) {
-                    self.deliver_at(stamp, kind);
-                }
-                if let Some((stamp, kind)) = self.imu_waiting.take() {
-                    self.read_imu(stamp, kind);
-                }
-            }
+            Ev::TaskFree => self.run_task(),
             Ev::Fault(i) => match self.sc.faults[i].kind {
                 FaultKind::ClockGlitch { back_us } => self.clock_back_us += back_us,
                 // The configurator asks over USB, whatever the RC link does.
@@ -499,22 +509,7 @@ impl Sim {
     /// The board stamps a sample at data-ready (in the interrupt) and steps
     /// it after the SPI read.
     fn deliver_imu(&mut self, kind: EventKind) {
-        self.data_ready(self.t_us, kind);
-    }
-
-    fn data_ready(&mut self, stamp: u64, kind: EventKind) {
-        if self.fault_active(FaultKind::FcStall) {
-            self.stalled_imu = Some((stamp, kind));
-        } else if self.imu_read.is_some() {
-            self.imu_waiting = Some((stamp, kind));
-        } else {
-            self.read_imu(stamp, kind);
-        }
-    }
-
-    fn read_imu(&mut self, stamp: u64, kind: EventKind) {
-        self.imu_read = Some((stamp, kind));
-        self.schedule(self.t_us + self.sc.imu.read_delay_us, Ev::ImuDeliver);
+        self.deliver(kind);
     }
 
     fn on_rc(&mut self) {
@@ -532,24 +527,44 @@ impl Sim {
             return;
         }
         let mut channels = sticks.channels();
+        let mut noise = false;
         if let Some(p) = self.active_fault(|k| match *k {
             FaultKind::RcGlitch { p } => Some(p),
             _ => None,
         }) {
             if self.rng_rc.chance(p) {
                 if self.rng_rc.chance(0.5) {
-                    let i = self.rng_rc.range_u64(0, RC_CHANNELS as u64) as usize;
-                    channels[i] = *self.rng_rc.pick(&[0u16, 172, 3000, 65535, 2200, 700]);
+                    noise = true;
                 } else {
-                    // Corruption that passes the CRC: a plausible value on a
+                    // Corruption that passes the CRC: any 11-bit value on a
                     // stick or the mode switch (the arm channel is left
                     // alone; see the README).
                     let i = *self.rng_rc.pick(&[0usize, 1, 2, 3, 5]);
-                    channels[i] = self.rng_rc.range_u64(988, 2013) as u16;
+                    channels[i] = crsf_to_us(self.rng_rc.range_u64(0, 2048) as u16);
                 }
             }
         }
-        self.deliver(EventKind::Rc { channels });
+        // The receiver's bytes, as the board's UART hands them to the
+        // parser: now and then a link-statistics frame first, which the
+        // parser skips.
+        let mut bytes = Vec::with_capacity(40);
+        if self.rng_rc.chance(0.2) {
+            bytes.extend_from_slice(&crsf_frame(0x14, &[0x5A, 0x60, 100, 8, 0, 4, 2, 0x58, 100, 7]));
+        }
+        bytes.extend_from_slice(&crsf_rc_frame(&channels));
+        if noise {
+            // Noise on the wire flips a few bits. The CRC rejects the frame;
+            // a hit on the length byte can cost the next frame too.
+            for _ in 0..self.rng_rc.range_u64(1, 4) {
+                let i = self.rng_rc.range_u64(0, bytes.len() as u64) as usize;
+                bytes[i] ^= 1 << self.rng_rc.range_u64(0, 8);
+            }
+        }
+        for b in bytes {
+            if let Some(channels) = self.crsf.push(b) {
+                self.deliver(EventKind::Rc { channels });
+            }
+        }
     }
 
     fn deliver(&mut self, kind: EventKind) {
@@ -558,29 +573,6 @@ impl Sim {
 
     /// Passes an event stamped at `stamp` to the board's control task.
     fn deliver_at(&mut self, stamp: u64, kind: EventKind) {
-        let is_imu = matches!(kind, EventKind::Imu { .. });
-        if self.fault_active(FaultKind::FcStall) {
-            match kind {
-                EventKind::Imu { .. } => self.stalled_imu = Some((stamp, kind)),
-                // The control task makes its own ticks; a stalled one makes none.
-                EventKind::Tick => {}
-                _ if self.stalled.len() < 32 => self.stalled.push((stamp, kind)),
-                _ => {}
-            }
-            return;
-        }
-        // After a stall the task steps the queue first, then reads the newest
-        // data-ready.
-        for (stamp, kind) in std::mem::take(&mut self.stalled) {
-            self.step_fc(stamp, kind);
-        }
-        if let Some((stamp, kind)) = self.stalled_imu.take() {
-            self.data_ready(stamp, kind);
-        }
-        if !is_imu && self.imu_read.is_some() {
-            self.held.push((stamp, kind));
-            return;
-        }
         if let Some(p) = self.active_fault(|k| match *k {
             FaultKind::EventDrop { p } => Some(p),
             _ => None,
@@ -589,10 +581,77 @@ impl Sim {
                 return;
             }
         }
-        self.step_fc(stamp, kind);
+        let task = &mut self.task;
+        match kind {
+            // Data-ready only keeps the newest sample.
+            EventKind::Imu { .. } => {
+                if task.drdy.replace((stamp, kind)).is_some() {
+                    self.imu_missed += 1;
+                }
+            }
+            // The task's own timer: one tick however late it gets to it.
+            EventKind::Tick => task.tick_due = true,
+            _ if task.queue.len() < EVENT_QUEUE => task.queue.push_back((stamp, kind)),
+            _ => {}
+        }
+        self.run_task();
     }
 
-    fn step_fc(&mut self, stamp: u64, kind: EventKind) {
+    /// Runs the control task until it is busy or has nothing to do. Like
+    /// the board's loop, it takes queued events first, then the newest
+    /// data-ready (reading it over SPI, then stepping it), then the tick,
+    /// which it stamps when it gets to it.
+    fn run_task(&mut self) {
+        let t = self.t_us;
+        if self.task.busy_until > t {
+            return;
+        }
+        // A stalled task does nothing until the stall ends.
+        if let Some(end) = self.sc.faults.iter().find(|f| f.kind == FaultKind::FcStall && f.active(t)).map(Fault::end_us) {
+            self.busy(end);
+            return;
+        }
+        let (stamp, kind, read_us) = if let Some((stamp, kind)) = self.task.reading.take() {
+            (stamp, kind, self.sc.imu.read_delay_us)
+        } else if let Some((stamp, kind)) = self.task.queue.pop_front() {
+            (stamp, kind, 0)
+        } else if let Some(sample) = self.task.drdy.take() {
+            self.task.reading = Some(sample);
+            self.busy(t + self.sc.imu.read_delay_us);
+            return;
+        } else if std::mem::take(&mut self.task.tick_due) {
+            (t, EventKind::Tick, 0)
+        } else {
+            return;
+        };
+        let cost = self.cpu_us(&kind);
+        self.task_busy_max_us = self.task_busy_max_us.max(read_us + cost);
+        self.step_fc(stamp, kind, cost);
+        self.busy(t + cost);
+    }
+
+    fn busy(&mut self, until: u64) {
+        self.task.busy_until = until;
+        self.schedule(until, Ev::TaskFree);
+    }
+
+    /// CPU time to step `kind` and apply its effects on the board, µs:
+    /// instructions per event as counted for `step` on a Cortex-M4 under
+    /// QEMU (`cd0b6d3`), plus the loop, the executor, and building the
+    /// DShot frame, at the scenario's cycles per instruction and 96 MHz.
+    fn cpu_us(&mut self, kind: &EventKind) -> u64 {
+        let (lo, hi) = match kind {
+            EventKind::Imu { .. } => (3_500.0, 7_100.0),
+            EventKind::MotorTelemetry { .. } => (1_000.0, 2_000.0),
+            _ => (300.0, 500.0),
+        };
+        let instructions = self.rng_cpu.range(lo, hi) + 1_000.0;
+        (instructions * self.sc.cycles_per_instruction / 96.0) as u64 + 1
+    }
+
+    /// Steps the firmware on one event; its motor command goes out when the
+    /// step is done, `cost_us` later.
+    fn step_fc(&mut self, stamp: u64, kind: EventKind, cost_us: u64) {
         let t_fc = (stamp + self.sc.clock_offset_us).saturating_sub(std::mem::take(&mut self.clock_back_us));
         let event = Event { t_us: t_fc, kind };
         let before = self.status;
@@ -609,7 +668,7 @@ impl Sim {
                 Effect::Motors(m) => {
                     hash_debug(&mut self.motor_hash, &m);
                     self.pending_motors.push_back(m);
-                    self.schedule(self.t_us + MOTOR_LATENCY_US, Ev::ApplyMotors);
+                    self.schedule(self.t_us + cost_us + MOTOR_LATENCY_US, Ev::ApplyMotors);
                 }
                 Effect::Led(on) => self.led = on,
                 Effect::Beeper(on) => self.beeper = on,
@@ -623,6 +682,48 @@ impl Sim {
         }
         self.monitor.on_step(Step { t: self.t_us, event: &event, fx: &fx, before: &before, after: &status, world: &self.world, sc: &self.sc });
     }
+}
+
+/// A CRSF frame to the flight controller: address, length, type, payload,
+/// CRC.
+fn crsf_frame(kind: u8, payload: &[u8]) -> Vec<u8> {
+    let mut f = vec![0xC8, payload.len() as u8 + 2, kind];
+    f.extend_from_slice(payload);
+    f.push(crsf_crc8(&f[2..]));
+    f
+}
+
+/// An RC channels frame as an ExpressLRS receiver sends it: 16 channels of
+/// 11 bits (172..1811 for 988..2012 µs), the ones past ours centered.
+fn crsf_rc_frame(us: &[u16; RC_CHANNELS]) -> Vec<u8> {
+    let mut payload = [0u8; 22];
+    for i in 0..16 {
+        let v = us.get(i).map_or(992, |&us| (992 + ((us as i32 - 1500) * 8) / 5).clamp(0, 2047) as u32);
+        for b in 0..11 {
+            if v >> b & 1 != 0 {
+                let bit = i * 11 + b;
+                payload[bit / 8] |= 1 << (bit % 8);
+            }
+        }
+    }
+    crsf_frame(CRSF_RC_CHANNELS_PACKED, &payload)
+}
+
+/// Depth of the board's `EVENTS` queue; a full one drops what arrives.
+const EVENT_QUEUE: usize = 32;
+
+/// The board's control task (`control.rs`): one loop steps every event.
+/// While it is busy, reading a sample over SPI or stepping, RC, battery and
+/// telemetry wait in its queue, the newest data-ready waits (an older
+/// unread one is lost), and so does its 1 ms timer.
+#[derive(Clone, Debug, Default)]
+struct Task {
+    busy_until: u64,
+    /// The sample being read, stamped at data-ready.
+    reading: Option<(u64, EventKind)>,
+    queue: VecDeque<(u64, EventKind)>,
+    drdy: Option<(u64, EventKind)>,
+    tick_due: bool,
 }
 
 fn hash_debug<T: core::fmt::Debug>(h: &mut u64, v: &T) {

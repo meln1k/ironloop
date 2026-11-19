@@ -305,3 +305,23 @@ fn miswired_or_reversed_motors_never_fly() {
     }
     assert!(failures.is_empty(), "{failures:#?}");
 }
+
+/// A worn, nearly empty pack sags under the receiver's brownout voltage in
+/// a hover, and the receiver reboots. The firmware sees that as a lost
+/// link: the failsafe must take over and every property hold.
+#[test]
+fn a_receiver_brownout_is_a_lost_link() {
+    let mut sc = Scenario::nominal(7, FlightMode::Angle);
+    sc.battery.soc = 0.15;
+    sc.battery.r_int = 0.15;
+    sc.battery.base_amps = 1.8;
+    sc.battery.volts = sc.battery.open_circuit(sc.battery.soc);
+    sc.rx_brownout_v = 2.85;
+    let mut sim = ironloop_sim::Sim::new(sc);
+    sim.run();
+    sim.monitor.on_end(sim.t_us, None);
+    let failsafe = sim.notices.iter().any(|(_, n)| matches!(n, ironloop_fc::Notice::Failsafe(_)));
+    assert!(sim.rx_brownouts > 0, "no brownout");
+    assert!(failsafe, "no failsafe: {:?}", sim.notices);
+    assert!(sim.monitor.violations.is_empty(), "{:?}", sim.monitor.violations);
+}

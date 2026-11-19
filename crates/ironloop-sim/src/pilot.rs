@@ -104,10 +104,14 @@ impl Pilot {
 
         let hold_alt = |p: &mut Pilot, target: f32| {
             let e = (target - alt).clamp(-1.5, 1.5);
-            // Trim except on the way down: integrating through a long
-            // descent winds up and turns a 15 m descent into a 4 m/s dive.
+            // On the way down the trim only unwinds what a climb wound up:
+            // integrating through a long descent winds up and turns a 15 m
+            // descent into a 4 m/s dive, but trim left from a long climb
+            // must go, or it holds the quad climbing above the target.
             if e > -0.5 {
                 p.alt_i = (p.alt_i + 0.08 * e * dt).clamp(-0.25, 0.25);
+            } else if p.alt_i > 0.0 {
+                p.alt_i = (p.alt_i + 0.08 * e * dt).max(0.0);
             }
             let thr = 0.5 + p.alt_i + 0.14 * e + 0.09 * vel.z;
             let tilt = up.z.abs().max(0.5);

@@ -45,9 +45,10 @@ pub struct ImuModel {
     pub frame_accel: f32,
     pub gyro_range: f32,
     pub accel_range: f32,
-    /// Time from the data-ready timestamp to the sample's step: the SPI
-    /// read plus waiting for the control task, µs. Events that arrive in
-    /// between wait for it, since the same task steps them.
+    /// The SPI read of one sample, µs: 14 bytes at 8 MHz on the BMI270, 13
+    /// at 24 MHz on the ICM-42688, plus DMA set-up and waking the task.
+    /// Events that arrive meanwhile wait for it, since the same task steps
+    /// them.
     pub read_delay_us: u64,
     /// The delay of the chip's own filters on the body's motion and on
     /// sensor noise (Hz, two first-order stages after sampling): gyro and
@@ -86,7 +87,7 @@ impl Default for ImuModel {
             frame_accel: 1.5,
             gyro_range: 2000f32.to_radians(),
             accel_range: 16.0 * 9.80665,
-            read_delay_us: 110,
+            read_delay_us: 30,
             chip_lpf_hz: 250.0,
             axis_sign: [1.0; 3],
         }
@@ -351,6 +352,14 @@ pub struct Scenario {
     /// The board's battery voltage reading as a fraction of the truth
     /// (resistor divider and ADC tolerance).
     pub vbat_gain: f32,
+    /// CPU cycles per instruction of the flight code on the board: flash
+    /// wait states behind the ART accelerator, FP divides, and stalls make
+    /// it more than one.
+    pub cycles_per_instruction: f32,
+    /// Battery voltage under which the receiver (an ESP8285, 2.5 V minimum,
+    /// behind the board's regulator) browns out and reboots. The MCU, IMU
+    /// and ESCs hold on below it.
+    pub rx_brownout_v: f32,
 }
 
 /// Length of a [`Action::StickScript`] segment.
@@ -453,6 +462,7 @@ impl Scenario {
                 volts: Battery::ocv(0.95),
                 amps: 0.0,
                 base_amps: 0.45,
+                lihv: false,
                 absent: false,
             },
             wind: Wind::calm(),
@@ -471,6 +481,8 @@ impl Scenario {
             esc_telemetry: true,
             clock_offset_us: 0,
             vbat_gain: 1.0,
+            cycles_per_instruction: 1.4,
+            rx_brownout_v: 2.7,
         }
     }
 
@@ -496,6 +508,8 @@ impl Scenario {
         }
         // Drawn last so it left the rest of each scenario as it was.
         sc.vbat_gain = r.range(0.97, 1.03);
+        sc.cycles_per_instruction = Rng::fork(seed, "cpu").range(1.1, 1.8);
+        sc.rx_brownout_v = Rng::fork(seed, "brownout").range(2.6, 2.85);
         tags.sort();
         tags.dedup();
         sc.name = if tags.is_empty() { "clean".into() } else { tags.join(",") };
@@ -528,7 +542,16 @@ impl Scenario {
         self.battery.soc = r.range(0.12, 1.0);
         // A fresh 300 mAh 1S pack is about 0.03-0.08 ohm, a worn one 0.15.
         self.battery.r_int = r.range(0.03, 0.15);
-        self.battery.volts = Battery::ocv(self.battery.soc);
+        // The quad ships with LiHV packs, and its HDZero VTX alone draws
+        // about 1.5 A (5-6 W). Their own stream keeps the rest of each
+        // scenario as it was.
+        let chem = &mut Rng::fork(self.seed, "battery-chem");
+        self.battery.lihv = chem.chance(0.7);
+        self.battery.base_amps = chem.range(1.2, 2.0);
+        self.battery.volts = self.battery.open_circuit(self.battery.soc);
+        if self.battery.lihv {
+            tags.push("lihv".into());
+        }
         if self.battery.soc < 0.3 {
             tags.push("low-battery".into());
         }
@@ -553,7 +576,7 @@ impl Scenario {
             imu.aaf_hz = [751.0 * odr / 3200.0, 0.0];
         }
         imu.jitter_us = r.range_u64(2, 40);
-        imu.read_delay_us = r.range_u64(80, 160);
+        imu.read_delay_us = r.range_u64(15, 45);
         // Those filters delay the gyro by about 0.4-1 ms.
         imu.chip_lpf_hz = r.range(300.0, 750.0);
         imu.gyro_noise *= r.range(0.5, 2.5);

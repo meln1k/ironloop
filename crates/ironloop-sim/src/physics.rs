@@ -141,11 +141,19 @@ pub struct Battery {
     pub amps: f32,
     /// Electronics draw (FC, receiver, VTX) in amps.
     pub base_amps: f32,
+    /// A LiHV pack (4.35 V full), as the quad ships with, instead of LiPo.
+    pub lihv: bool,
     /// No pack plugged in (USB power only): motors cannot spin.
     pub absent: bool,
 }
 
 impl Battery {
+    /// Open-circuit voltage of this pack at `soc`: a LiHV cell sits up to
+    /// 0.15 V above a LiPo one when full, and about the same when empty.
+    pub fn open_circuit(&self, soc: f32) -> f32 {
+        Battery::ocv(soc) + if self.lihv { 0.15 * soc.clamp(0.0, 1.0) } else { 0.0 }
+    }
+
     /// Open-circuit voltage of a 1S LiPo against state of charge.
     pub fn ocv(soc: f32) -> f32 {
         const PTS: [(f32, f32); 9] = [
@@ -325,7 +333,7 @@ impl World {
         b.amps = amps;
         if !b.absent {
             b.soc = (b.soc - amps * dt / 3600.0 / b.capacity_ah).max(0.0);
-            b.volts = (Battery::ocv(b.soc) - amps * b.r_int).max(0.0);
+            b.volts = (b.open_circuit(b.soc) - amps * b.r_int).max(0.0);
         } else {
             b.volts = 0.0;
         }
