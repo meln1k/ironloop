@@ -64,6 +64,16 @@ pub struct ImuModel {
     pub axis_sign: [f32; 3],
 }
 
+/// A body-frame vector as a chip mounted `mount` reads it.
+pub(crate) fn to_sensor(mount: ImuAlignment, v: Vec3) -> Vec3 {
+    match mount {
+        ImuAlignment::Cw0 => v,
+        ImuAlignment::Cw90 => Vec3::new(v.y, -v.x, v.z),
+        ImuAlignment::Cw180 => Vec3::new(-v.x, -v.y, v.z),
+        ImuAlignment::Cw270 => Vec3::new(-v.y, v.x, v.z),
+    }
+}
+
 impl Default for ImuModel {
     fn default() -> Self {
         Self {
@@ -412,12 +422,53 @@ impl Scenario {
         self.motor_wiring[output]
     }
 
-    /// A build mistake that makes the controller push the wrong way, which
-    /// runaway detection must stop: motors in the wrong order or spinning
-    /// the wrong way, or an IMU axis with the wrong sign. (A flipped z axis
-    /// reads upside down and never arms.)
+    /// A build mistake: motors in the wrong order or spinning the wrong way,
+    /// or an IMU axis with the wrong sign. (A flipped z axis reads upside
+    /// down while the quad sits upright, so it does not arm from there; lying
+    /// on its back, it reads about level.)
     pub fn runaway_build(&self) -> bool {
         self.motor_wiring != [0, 1, 2, 3] || self.spin_reversed || self.imu.axis_sign != [1.0; 3]
+    }
+
+    /// A build mistake that makes the rate controller push some axis the
+    /// wrong way, which runaway detection must stop. Mistakes can cancel:
+    /// with the IMU a quarter turn off, an axis flipped, and two motors
+    /// swapped, every rate loop may still push the right way, and the
+    /// firmware flies it as well as any build; only the pilot sees the
+    /// axes turned and mirrored.
+    pub fn rate_loop_reversed(&self) -> bool {
+        self.runaway_build() && !self.rate_loop_sound()
+    }
+
+    /// Whether each of the controller's roll, pitch and yaw outputs turns
+    /// the frame, as the firmware's gyro reads it, the way it pushes, and
+    /// no other axis.
+    fn rate_loop_sound(&self) -> bool {
+        let f = &self.frame;
+        let torque = |m: usize, spin: f32| f.motor_pos[m].cross(Vec3::new(0.0, 0.0, -1.0)) + Vec3::new(0.0, 0.0, -spin * f.k_q_ratio);
+        let axis = |v: Vec3, j: usize| [v.x, v.y, v.z][j];
+        let spin_sign = if self.spin_reversed { -1.0 } else { 1.0 };
+        let opposite = |a: ImuAlignment| match a {
+            ImuAlignment::Cw0 => ImuAlignment::Cw0,
+            ImuAlignment::Cw90 => ImuAlignment::Cw270,
+            ImuAlignment::Cw180 => ImuAlignment::Cw180,
+            ImuAlignment::Cw270 => ImuAlignment::Cw90,
+        };
+        let [sx, sy, sz] = self.imu.axis_sign;
+        (0..3).all(|j| {
+            // The mixer drives each output by the sign of its motor's torque
+            // on this axis, for the frame as designed.
+            let mut t = Vec3::ZERO;
+            for i in 0..4 {
+                let drive = axis(torque(i, f.spin[i]), j).signum();
+                let m = self.wired(i);
+                t += torque(m, f.spin[m] * spin_sign) * drive;
+            }
+            let s = to_sensor(self.imu.mount, t);
+            let read = to_sensor(opposite(self.fc.imu_alignment), Vec3::new(s.x * sx, s.y * sy, s.z * sz));
+            let own = axis(read, j);
+            own > 0.0 && (0..3).all(|k| k == j || axis(read, k).abs() < 0.5 * own)
+        })
     }
 
     /// A calm, nominal flight: arm, take off, hover, cruise, land.

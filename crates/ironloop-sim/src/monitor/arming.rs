@@ -25,7 +25,7 @@ pub static ARM_BATTERY: Property = Property {
 };
 pub static ARM_LEVEL: Property = Property {
     name: "arm_level",
-    doc: "Arming never happens on the ground with the quad tilted past 33 deg (on its side, upside down).",
+    doc: "Arming never happens on the ground with the quad tilted past 33 deg (on its side, upside down), as its IMU reads gravity.",
 };
 pub static ARM_IMU_FRESH: Property = Property {
     name: "arm_imu_fresh",
@@ -47,6 +47,12 @@ pub static DISARM_JUSTIFIED: Property = Property {
 pub fn step(cx: &Cx, link: &Link, frame: &Frame, imu: &Imu, v: &mut Verdicts) {
     let (t, before, after, world) = (cx.t, cx.before, cx.after, cx.world);
     let imu_age = t.saturating_sub(imu.last_good_us);
+    // The tilt as the IMU shows gravity. A chip with its z axis flipped
+    // (one axis wrong, or mounted upside down) reads a quad lying on its
+    // back as nearly level, and no firmware can see past its only sensor
+    // of gravity: arming judges that reading. Runaway detection must
+    // still stop such a build once armed.
+    let arm_tilt = if cx.sc.imu.axis_sign[2] < 0.0 { core::f32::consts::PI - cx.true_tilt } else { cx.true_tilt };
     if let Some(ch) = frame.rc {
         if link.arm_on && !link.switch_seen_off {
             v.live(&ARM_SWITCH_CYCLED);
@@ -103,8 +109,8 @@ pub fn step(cx: &Cx, link: &Link, frame: &Frame, imu: &Imu, v: &mut Verdicts) {
         }
         // On the ground: re-arming in the air (after an IMU fault disarm)
         // is a recovery, not a tipped-over quad spinning up.
-        if world.body.on_ground && cx.true_tilt > REQ_ARM_TILT {
-            v.fail(t, &ARM_LEVEL, format!("true tilt {:.0} deg", cx.true_tilt.to_degrees()));
+        if world.body.on_ground && arm_tilt > REQ_ARM_TILT {
+            v.fail(t, &ARM_LEVEL, format!("true tilt {:.0} deg, as the IMU reads it {:.0} deg", cx.true_tilt.to_degrees(), arm_tilt.to_degrees()));
         }
     }
 
@@ -122,7 +128,7 @@ pub fn step(cx: &Cx, link: &Link, frame: &Frame, imu: &Imu, v: &mut Verdicts) {
         if world.battery.absent {
             v.live(&ARM_BATTERY);
         }
-        if world.body.on_ground && cx.true_tilt > REQ_ARM_TILT {
+        if world.body.on_ground && arm_tilt > REQ_ARM_TILT {
             v.live(&ARM_LEVEL);
         }
         // Everything the firmware needs is really there: the pilot must be

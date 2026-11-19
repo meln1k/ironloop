@@ -59,7 +59,7 @@ arm_throttle_low               Arming only happens on an RC frame with throttle 
 arm_switch_cycled              Arming needs the arm switch seen off since boot.
 arm_calibrated                 Arming only happens after gyro calibration finished.
 arm_battery                    Arming never happens on USB power (no battery).
-arm_level                      Arming never happens on the ground tilted past 33°.
+arm_level                      Arming never happens on the ground tilted past 33°, as the IMU reads gravity.
 switch_disarms                 A valid RC frame with the arm switch off always leaves the quad disarmed.
 failsafe_enters                Armed with RC silent 150 ms is failsafe; silent under 50 ms never is.
 failsafe_no_spinup             If the throttle was at the bottom when the link was lost, failsafe adds none.
@@ -85,7 +85,7 @@ clock_monotonic                The firmware's clock never goes backwards, whatev
 attitude_unit                  The attitude quaternion stays unit length (within 1e-3).
 effects_fit                    No step produces more effects than its output buffer holds.
 no_panic                       The firmware never panics; its overflow checks are on in the DST build.
-runaway_stops                  A quad with its motors in the wrong order or spinning the wrong way, or an IMU axis flipped, never climbs above 1 m and stops within 5 s of throttle-up.
+runaway_stops                  A quad whose rate loop pushes an axis the wrong way (motors in the wrong order or spinning the wrong way, an IMU axis flipped) never climbs above 1 m and stops within 5 s of throttle-up.
 battery_notice_true            Battery warning/critical only when the pack really was below 3.62 / 3.45 V in the last 2 s.
 motor_fault_true               A motor fault notice only for a motor really stalled or weakened in the last 300 ms.
 link_recovers                  In failsafe with the link back without a gap for 1 s and the switch on, failsafe ends.

@@ -66,12 +66,41 @@ fn generated_scenarios_hold_every_property_and_replay_identically() {
 /// shaft-rate tone once passed the 150 Hz gyro low-pass into the motors.
 /// Seed 73501 hovers through corrupted RC frames that pass the CRC, which
 /// `motors_quiet` once scored as motor noise.
+/// Seed 45798's mistakes cancel in
+/// the rate loops (IMU a quarter turn off, an axis flipped, two motors
+/// swapped), so it flies until the pilot's corrections tip it; the monitor
+/// once demanded that runaway detection stop it.
 #[test]
 fn regression_seeds_hold_every_property() {
-    for seed in [1531, 822, 3007, 6875, 3934, 838, 88, 445, 519, 70, 688, 257, 209, 741, 1360, 1979, 290248, 445159, 34731, 315882, 4285, 6018, 42067, 7861, 73501] {
+    for seed in [1531, 822, 3007, 6875, 3934, 838, 88, 445, 519, 70, 688, 257, 209, 741, 1360, 1979, 290248, 445159, 34731, 315882, 4285, 6018, 42067, 7861, 73501, 45798] {
         let r = run_seed(seed);
         assert!(r.violations.is_empty(), "seed {seed} [{}]: {:?}", r.name, r.violations);
     }
+}
+
+/// `runaway_stops` excuses builds whose mistakes cancel in the rate loops;
+/// any single mistake must still count as reversed, and a combination as
+/// sound only when the signs really cancel.
+#[test]
+fn a_single_build_mistake_reverses_a_rate_loop() {
+    let mut single = 0;
+    for seed in 0..3000 {
+        let mut sc = Scenario::generate(seed);
+        let mistakes = (sc.imu.axis_sign != [1.0; 3]) as u8 + (sc.motor_wiring != [0, 1, 2, 3]) as u8 + sc.spin_reversed as u8;
+        if mistakes == 1 && sc.imu.mount == sc.fc.imu_alignment {
+            single += 1;
+            assert!(sc.rate_loop_reversed(), "seed {seed} [{}]", sc.name);
+        }
+        // A flipped yaw gyro with reversed props pushes yaw the right way
+        // round, and nothing else is wrong.
+        if mistakes == 0 && sc.imu.mount == sc.fc.imu_alignment {
+            sc.imu.axis_sign = [1.0, 1.0, -1.0];
+            assert!(sc.rate_loop_reversed(), "seed {seed}: z flipped alone");
+            sc.spin_reversed = true;
+            assert!(!sc.rate_loop_reversed(), "seed {seed}: z flipped and spin reversed");
+        }
+    }
+    assert!(single > 100, "only {single} single-mistake builds");
 }
 
 /// Seed 1269 loses the link at altitude and touches down by failsafe while

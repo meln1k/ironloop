@@ -11,7 +11,7 @@ use std::collections::{BinaryHeap, VecDeque};
 use ironloop_fc::math::Vec3;
 use ironloop_fc::proto::{CRSF_RC_CHANNELS_PACKED, CrsfParser, crsf_crc8, crsf_to_us, decode_erpm_reply, erpm_reply};
 use ironloop_fc::{
-    Effect, Event, EventKind, ImuAlignment, Notice, RC_CHANNELS, State, Status, step,
+    Effect, Event, EventKind, Notice, RC_CHANNELS, State, Status, step,
 };
 use libm::{cosf, sinf};
 
@@ -497,12 +497,7 @@ impl Sim {
             accel += a * (imu.frame_accel * size);
         }
 
-        let to_sensor = |v: Vec3| match imu.mount {
-            ImuAlignment::Cw0 => v,
-            ImuAlignment::Cw90 => Vec3::new(v.y, -v.x, v.z),
-            ImuAlignment::Cw180 => Vec3::new(-v.x, -v.y, v.z),
-            ImuAlignment::Cw270 => Vec3::new(-v.y, v.x, v.z),
-        };
+        let to_sensor = |v: Vec3| crate::scenario::to_sensor(imu.mount, v);
         let quant = |v: Vec3, range: f32| {
             let lsb = range / 32768.0;
             let q = |x: f32| (x.clamp(-range, range - lsb) / lsb).round() * lsb;
