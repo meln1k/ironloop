@@ -9,6 +9,9 @@ Runs `dst --list-failures` over the seeds and lists every failing seed by
 property, so the document is complete for the range it names. Seed numbers
 are only meaningful for the commit it records: regenerate it after changing
 the scenario generator, the simulator, or the firmware.
+
+Everything from the CASES heading on is written by hand (cases from larger
+sweeps, with their status) and is kept as it is.
 """
 
 import os
@@ -17,6 +20,7 @@ import sys
 
 ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
 OUT = "crates/ironloop-sim/FAILING_SEEDS.md"
+CASES = "## Cases from larger sweeps"
 
 
 def main():
@@ -69,8 +73,10 @@ def main():
             lines += ["", f"## `{prop}` ({len(fails)})", "", "| Seed | At | Detail | Workload |", "| --- | --- | --- | --- |"]
             for seed, t_us, detail, workload in sorted(fails):
                 lines.append(f"| {seed} | {t_us / 1e6:.3f} s | {detail.replace('|', '/')} | {workload} |")
+    old = open(OUT).read() if os.path.exists(OUT) else ""
+    kept = old[old.index(CASES):] if CASES in old else ""
     with open(OUT, "w") as f:
-        f.write("\n".join(lines) + "\n")
+        f.write("\n".join(lines) + "\n" + ("\n" + kept if kept else ""))
     print(f"wrote {OUT}: {sum(map(len, by_prop.values()))} failures in {len({s for v in by_prop.values() for s, *_ in v})} seeds")
 
 
