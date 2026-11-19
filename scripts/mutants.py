@@ -7,7 +7,7 @@ means the workload or the properties miss a real-world case. The
 "monitor:" mutants instead break the checker (the simulator's monitor) in
 ways that once hid real firmware failures.
 
-Usage: scripts/mutants.py [seeds] [name filter]   (default 300; run from anywhere)
+Usage: scripts/mutants.py [--quick] [seeds] [name filter]   (default 300; run from anywhere)
 
 For the unmodified firmware and then each mutant this runs the DST sweep,
 the firmware unit tests, and the simulator tests, and builds the Mobula6
@@ -15,6 +15,11 @@ board firmware (a core change it no longer compiles against). A mutant is caught
 any of them fails where the unmodified firmware passed: a new failing test,
 or a property failing on a seed where it held before. The
 source files are restored after every mutant, even on Ctrl-C or SIGTERM.
+
+--quick stops checking a mutant at its first new failure: the cheap checks
+run first, and the sweep is stopped as soon as a seed fails a property it
+held before. Each mutant is caught or survives exactly as without it, but
+its line names only the first failure found.
 """
 
 import os
@@ -147,32 +152,55 @@ def run(cmd):
     return subprocess.run(cmd, capture_output=True, text=True)
 
 
-def check(seeds):
-    """Builds and runs every check; returns the set of failures: a property
-    on a seed as "property@seed", anything else by name."""
-    b = run(["cargo", "build", "-q", "--release", "-p", "ironloop-sim", "--bin", "dst"])
-    if b.returncode != 0:
-        return {"build: " + b.stderr[-300:]}
-    out = run(["./target/release/dst", "--seeds", seeds, "--list-failures"]).stdout
+def sweep(seeds, base):
+    """The DST sweep's failures; with `base`, stops at the first one not in
+    it."""
+    cmd = ["./target/release/dst", "--seeds", seeds, "--stream-failures" if base is not None else "--list-failures"]
     fails = set()
-    for line in out.splitlines():
-        if line.startswith("failure "):
-            _, seed, prop = line.split()[:3]
-            fails.add(f"{prop}@{seed}")
-        elif line.startswith("  FAIL  deterministic_replay") or line.startswith("  THIN  "):
-            fails.add(line.strip())
+    with subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True) as p:
+        for line in p.stdout:
+            if line.startswith("failure "):
+                _, seed, prop = line.split()[:3]
+                fails.add(f"{prop}@{seed}")
+            elif line.startswith("  FAIL  deterministic_replay") or line.startswith("  THIN  "):
+                fails.add(line.strip())
+            if base is not None and fails - base:
+                p.kill()
+                break
+    return fails
+
+
+def tests(pkg, extra):
+    t = run(["cargo", "test", "-q", "--release", "-p", pkg] + extra)
+    # `-q` reports a failure as "name --- FAILED".
+    failed = set(re.findall(r"^(\S+) --- FAILED$", t.stdout, re.M))
+    if t.returncode != 0 and not failed:
+        failed = {f"{pkg} tests failed or did not build"}
+    return failed
+
+
+def firmware():
     # Type-checking is enough to see a core change break the board, and
     # skips the firmware's fat-LTO link on every mutant.
     fw = subprocess.run(["cargo", "check", "-q"], cwd="firmware/mobula6", capture_output=True, text=True)
-    if fw.returncode != 0:
-        fails.add("firmware build")
-    for pkg, extra in (("ironloop-fc", []), ("ironloop-sim", ["--test", "dst"])):
-        t = run(["cargo", "test", "-q", "--release", "-p", pkg] + extra)
-        # `-q` reports a failure as "name --- FAILED".
-        failed = set(re.findall(r"^(\S+) --- FAILED$", t.stdout, re.M))
-        if t.returncode != 0 and not failed:
-            failed = {f"{pkg} tests failed or did not build"}
-        fails |= failed
+    return set() if fw.returncode == 0 else {"firmware build"}
+
+
+def check(seeds, base=None):
+    """Builds and runs every check; returns the set of failures: a property
+    on a seed as "property@seed", anything else by name. With `base` (quick
+    mode), returns as soon as something fails that is not in it, cheapest
+    checks first."""
+    b = run(["cargo", "build", "-q", "--release", "-p", "ironloop-sim", "--bin", "dst"])
+    if b.returncode != 0:
+        return {"build: " + b.stderr[-300:]}
+    if base is None:
+        return sweep(seeds, None) | firmware() | tests("ironloop-fc", []) | tests("ironloop-sim", ["--test", "dst"])
+    fails = set()
+    for step in (firmware, lambda: tests("ironloop-fc", []), lambda: sweep(seeds, base), lambda: tests("ironloop-sim", ["--test", "dst"])):
+        fails |= step()
+        if fails - base:
+            break
     return fails
 
 
@@ -200,8 +228,10 @@ def main():
     os.chdir(ROOT)
     # Restore the sources when killed too, not only on Ctrl-C.
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(143))
-    seeds = sys.argv[1] if len(sys.argv) > 1 else "300"
-    only = sys.argv[2] if len(sys.argv) > 2 else ""
+    args = [a for a in sys.argv[1:] if a != "--quick"]
+    quick = len(args) < len(sys.argv) - 1
+    seeds = args[0] if args else "300"
+    only = args[1] if len(args) > 1 else ""
     originals = {f: open(f).read() for f in {f for m in MUTANTS.values() for f, _, _ in m}}
     base = check(seeds)
     print(f"baseline: {', '.join(new_failures(set(), base)) or 'clean'}", flush=True)
@@ -216,7 +246,7 @@ def main():
                 text[f] = text[f].replace(a, b)
             for f, t in text.items():
                 write(f, t)
-            fails = new_failures(base, check(seeds))
+            fails = new_failures(base, check(seeds, base if quick else None))
             print(f"{'caught' if fails else 'SURVIVED':9} {name:48} {', '.join(fails)}", flush=True)
             if not fails:
                 survived.append(name)

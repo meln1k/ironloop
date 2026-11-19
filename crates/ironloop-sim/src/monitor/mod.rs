@@ -19,8 +19,6 @@
 //! situation it guards actually happened), so a sweep can tell a property
 //! that held from one that was never exercised.
 
-use std::collections::BTreeMap;
-
 use ironloop_fc::{DisarmReason, Effect, Event, EventKind, Notice, RC_CHANNELS, Status, ch};
 
 use crate::physics::World;
@@ -125,9 +123,42 @@ pub struct Stats {
     pub disarms: u32,
     pub notices: u32,
     /// Steps on which each property's precondition was live.
-    pub live: BTreeMap<&'static str, u64>,
+    pub live: Live,
     /// Kinds of the faults that started while the quad was airborne.
     pub faults_in_flight: Vec<&'static str>,
+}
+
+/// Counts by property name, read and printed like a `BTreeMap`. The monitor
+/// counts dozens of properties on every step, so a count is found by the
+/// address of the name, without comparing strings.
+#[derive(Clone, Default, PartialEq)]
+pub struct Live(Vec<(&'static str, u64)>);
+
+impl Live {
+    pub fn get(&self, name: &str) -> Option<&u64> {
+        self.0.iter().find(|(n, _)| *n == name).map(|(_, c)| c)
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = (&&'static str, &u64)> {
+        self.0.iter().map(|(n, c)| (n, c))
+    }
+
+    fn bump(&mut self, name: &'static str) {
+        if let Some((_, c)) = self.0.iter_mut().find(|(n, _)| core::ptr::eq(*n, name)) {
+            *c += 1;
+        } else if let Some((_, c)) = self.0.iter_mut().find(|(n, _)| *n == name) {
+            *c += 1;
+        } else {
+            let at = self.0.partition_point(|(n, _)| *n < name);
+            self.0.insert(at, (name, 1));
+        }
+    }
+}
+
+impl core::fmt::Debug for Live {
+    fn fmt(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result {
+        f.debug_map().entries(self.iter()).finish()
+    }
 }
 
 /// One firmware step as the simulator saw it.
@@ -178,7 +209,7 @@ struct Verdicts<'a> {
 
 impl Verdicts<'_> {
     fn live(&mut self, p: &Property) {
-        *self.stats.live.entry(p.name).or_default() += 1;
+        self.stats.live.bump(p.name);
     }
 
     fn fail(&mut self, t_us: u64, p: &Property, detail: String) {

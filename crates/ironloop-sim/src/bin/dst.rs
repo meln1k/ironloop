@@ -1,7 +1,7 @@
 //! Deterministic simulation test runner.
 //!
 //! ```text
-//! dst [--seeds N] [--start S] [--seed X] [--verbose] [--properties] [--list-failures]
+//! dst [--seeds N] [--start S] [--seed X] [--verbose] [--properties] [--list-failures] [--stream-failures]
 //! ```
 //!
 //! Runs `N` generated scenarios starting at seed `S` on all cores, checks
@@ -13,10 +13,12 @@
 //! replays one seed with its full scenario, notices, and stats.
 //! `--list-failures` also prints every failing seed, one
 //! `failure <seed> <property> <time_us> [<workload>] <detail>` line each,
-//! for scripts.
+//! for scripts. `--stream-failures` prints those lines as each seed
+//! finishes instead, in no particular order, so a script can stop the
+//! sweep at the first failure it cares about.
 
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use ironloop_sim::monitor::PROPERTIES;
 use ironloop_sim::{FaultKind, RunReport, Scenario, Sim, run_seed};
@@ -83,40 +85,23 @@ fn main() {
 
     let n = arg("--seeds").unwrap_or(200);
     let start = arg("--start").unwrap_or(0);
-    let next = Arc::new(AtomicU64::new(start));
-    let reports = Arc::new(Mutex::new(Vec::<RunReport>::new()));
-    let threads = std::thread::available_parallelism().map_or(2, |n| n.get());
     let began = std::time::Instant::now();
-    let handles: Vec<_> = (0..threads)
-        .map(|_| {
-            let next = next.clone();
-            let reports = reports.clone();
-            std::thread::spawn(move || {
-                loop {
-                    let seed = next.fetch_add(1, Ordering::Relaxed);
-                    if seed >= start + n {
-                        break;
-                    }
-                    let r = run_seed(seed);
-                    reports.lock().unwrap().push(r);
-                }
-            })
-        })
-        .collect();
-    for h in handles {
-        h.join().unwrap();
-    }
-    let mut reports = Arc::try_unwrap(reports).unwrap().into_inner().unwrap();
-    reports.sort_by_key(|r| r.seed);
-
-    // Determinism: replay a sample and compare full-trace hashes.
-    let mut nondeterministic = Vec::new();
-    for r in reports.iter().step_by((reports.len() / 8).max(1)) {
-        let again = run_seed(r.seed);
-        if again.trace_hash != r.trace_hash {
-            nondeterministic.push(r.seed);
+    // Determinism: a sample of the seeds runs twice, in the same pool as the
+    // sweep so no core waits on the replays at the end.
+    let seeds: Vec<u64> = (start..start + n).collect();
+    let sample: Vec<u64> = seeds.iter().copied().step_by((seeds.len() / 8).max(1)).collect();
+    let stream = args.iter().any(|a| a == "--stream-failures");
+    let mut reports = run_all(&[&seeds[..], &sample[..]].concat(), |i, r| {
+        if stream && i < seeds.len() {
+            print!("{}", failure_lines(r));
         }
-    }
+    });
+    let replays = reports.split_off(seeds.len());
+    let nondeterministic: Vec<u64> = reports
+        .iter()
+        .filter(|r| replays.iter().any(|again| again.seed == r.seed && again.trace_hash != r.trace_hash))
+        .map(|r| r.seed)
+        .collect();
 
     let mut by_prop: std::collections::BTreeMap<&str, Vec<u64>> = Default::default();
     let mut tags: std::collections::BTreeMap<String, u32> = Default::default();
@@ -144,9 +129,7 @@ fn main() {
     }
     if args.iter().any(|a| a == "--list-failures") {
         for r in &reports {
-            for v in &r.violations {
-                println!("failure {} {} {} [{}] {}", r.seed, v.property, v.t_us, r.name, v.detail);
-            }
+            print!("{}", failure_lines(r));
         }
     }
     println!();
@@ -160,7 +143,7 @@ fn main() {
     let mut airborne_s = 0.0;
     for r in &reports {
         airborne_s += r.stats.airborne_us as f64 * 1e-6;
-        for (p, n) in &r.stats.live {
+        for (p, n) in r.stats.live.iter() {
             if *n > 0 {
                 *live_seeds.entry(p).or_default() += 1;
             }
@@ -219,4 +202,33 @@ fn main() {
     }
     let failed = !by_prop.is_empty() || !nondeterministic.is_empty() || !thin.is_empty();
     std::process::exit(if failed { 1 } else { 0 });
+}
+
+/// One `failure` line per violation of the run.
+fn failure_lines(r: &RunReport) -> String {
+    r.violations.iter().map(|v| format!("failure {} {} {} [{}] {}\n", r.seed, v.property, v.t_us, r.name, v.detail)).collect()
+}
+
+/// Runs every seed on all cores, calling `done` with each seed's index and
+/// report as it finishes; the reports come back in the order of `seeds`.
+fn run_all(seeds: &[u64], done: impl Fn(usize, &RunReport) + Sync) -> Vec<RunReport> {
+    let next = AtomicUsize::new(0);
+    let reports = Mutex::new(Vec::with_capacity(seeds.len()));
+    let threads = std::thread::available_parallelism().map_or(2, |n| n.get());
+    std::thread::scope(|s| {
+        for _ in 0..threads {
+            s.spawn(|| {
+                loop {
+                    let i = next.fetch_add(1, Ordering::Relaxed);
+                    let Some(&seed) = seeds.get(i) else { break };
+                    let r = run_seed(seed);
+                    done(i, &r);
+                    reports.lock().unwrap().push((i, r));
+                }
+            });
+        }
+    });
+    let mut reports = reports.into_inner().unwrap();
+    reports.sort_by_key(|(i, _)| *i);
+    reports.into_iter().map(|(_, r)| r).collect()
 }

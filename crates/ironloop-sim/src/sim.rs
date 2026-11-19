@@ -79,6 +79,10 @@ pub struct Sim {
     chip_lpf: Option<([Vec3; 2], [Vec3; 2])>,
     /// The frame resonance's oscillators for gyro and accel.
     frame: [Resonance; 2],
+    /// The last frame resonance substep's coefficients.
+    frame_substep: Option<Substep>,
+    /// Each motor's last vibration tones' filter response, by its speed.
+    tone_memo: [Option<([u32; 3], [(f32, f32); 3])>; 4],
     /// Its own stream, so the frame's noise does not shift the sensor's.
     rng_vib: Rng,
     /// A clock jump back the firmware's next step will see.
@@ -142,6 +146,8 @@ impl Sim {
             imu_sampled_us: None,
             chip_lpf: None,
             frame: [Resonance::default(); 2],
+            frame_substep: None,
+            tone_memo: [None; 4],
             rng_vib: Rng::fork(seed, "vib"),
             clock_back_us: 0,
             manual: None,
@@ -442,27 +448,33 @@ impl Sim {
             let k = r * r;
             thrust += k / 4.0;
             let ph = m.phase + m.omega * since_grid + i as f32;
-            let tone = |h: f32| {
-                let (gain, lag) = chip(h * m.omega / TAU);
-                (h * ph - lag, gain * k)
+            // The filters' response to the three tones only changes with
+            // the motor's speed, which holds still while it is stopped.
+            let key = [m.omega, imu.aaf_hz[0], imu.aaf_hz[1]].map(f32::to_bits);
+            let resp = match self.tone_memo[i] {
+                Some((k, resp)) if k == key => resp,
+                _ => self.tone_memo[i].insert((key, [1.0, 2.0, 3.0].map(|h| chip(h * m.omega / TAU)))).1,
             };
+            let tone = |h: f32, (gain, lag): (f32, f32)| (h * ph - lag, gain * k);
             // Prop imbalance at shaft speed, twice it on yaw.
-            let (p1, k1) = tone(1.0);
-            let (p2, k2) = tone(2.0);
-            gyro += Vec3::new(sinf(p1) * k1, cosf(p1) * k1, 0.3 * sinf(p2) * k2) * imu.vib_gyro;
-            accel += Vec3::new(cosf(p1), sinf(p1), 1.5 * sinf(p1 + 0.7)) * (imu.vib_accel * k1);
+            let (p1, k1) = tone(1.0, resp[0]);
+            let (p2, k2) = tone(2.0, resp[1]);
+            let (s1, c1) = (sinf(p1), cosf(p1));
+            gyro += Vec3::new(s1 * k1, c1 * k1, 0.3 * sinf(p2) * k2) * imu.vib_gyro;
+            accel += Vec3::new(c1, s1, 1.5 * sinf(p1 + 0.7)) * (imu.vib_accel * k1);
             // Blade pass: mostly thrust pulses, so along z on the
             // accelerometer, and roll and pitch from the arm they act on.
-            let (p3, k3) = tone(3.0);
-            gyro += Vec3::new(sinf(p3), cosf(p3), 0.5 * sinf(p3 + 1.1)) * (imu.blade_gyro * k3);
-            accel += Vec3::new(0.3 * cosf(p3), 0.3 * sinf(p3), sinf(p3 + 0.4)) * (imu.blade_accel * k3);
+            let (p3, k3) = tone(3.0, resp[2]);
+            let (s3, c3) = (sinf(p3), cosf(p3));
+            gyro += Vec3::new(s3, c3, 0.5 * sinf(p3 + 1.1)) * (imu.blade_gyro * k3);
+            accel += Vec3::new(0.3 * c3, 0.3 * s3, sinf(p3 + 0.4)) * (imu.blade_accel * k3);
         }
         // A frame resonance rung by the airflow, scaled to its size at this
         // thrust.
         if (imu.frame_gyro > 0.0 || imu.frame_accel > 0.0) && dt > 0.0 {
             let r = &mut self.rng_vib;
-            let g = self.frame[0].step(imu.frame_hz, imu.frame_q, dt, r);
-            let a = self.frame[1].step(imu.frame_hz, imu.frame_q, dt, r);
+            let g = self.frame[0].step(imu.frame_hz, imu.frame_q, dt, r, &mut self.frame_substep);
+            let a = self.frame[1].step(imu.frame_hz, imu.frame_q, dt, r, &mut self.frame_substep);
             let size = thrust * chip(imu.frame_hz).0;
             gyro += g * (imu.frame_gyro * size);
             accel += a * (imu.frame_accel * size);
@@ -660,8 +672,8 @@ impl Sim {
         self.status = status;
         self.events_delivered += 1;
 
-        hash_debug(&mut self.trace_hash, &event);
-        hash_debug(&mut self.trace_hash, &fx);
+        hash_event(&mut self.trace_hash, &event);
+        hash_effects(&mut self.trace_hash, &fx);
 
         for e in &fx {
             match *e {
@@ -726,18 +738,151 @@ struct Task {
     tick_due: bool,
 }
 
+/// FNV-1a over text written to it.
+struct Fnv<'a>(&'a mut u64);
+
+impl Fnv<'_> {
+    fn bytes(&mut self, bytes: &[u8]) {
+        for &b in bytes {
+            *self.0 = (*self.0 ^ b as u64).wrapping_mul(0x100_0000_01b3);
+        }
+    }
+
+    /// `{n}`.
+    fn int(&mut self, mut n: u64) {
+        let mut digits = [0u8; 20];
+        let mut at = digits.len();
+        loop {
+            at -= 1;
+            digits[at] = b'0' + (n % 10) as u8;
+            n /= 10;
+            if n == 0 {
+                break;
+            }
+        }
+        self.bytes(&digits[at..]);
+    }
+
+    /// `{items:?}`, with `item` writing each one.
+    fn list<T>(&mut self, items: &[T], mut item: impl FnMut(&mut Self, &T)) {
+        self.bytes(b"[");
+        for (i, x) in items.iter().enumerate() {
+            if i > 0 {
+                self.bytes(b", ");
+            }
+            item(self, x);
+        }
+        self.bytes(b"]");
+    }
+}
+
+impl core::fmt::Write for Fnv<'_> {
+    fn write_str(&mut self, s: &str) -> core::fmt::Result {
+        self.bytes(s.as_bytes());
+        Ok(())
+    }
+}
+
 fn hash_debug<T: core::fmt::Debug>(h: &mut u64, v: &T) {
     use core::fmt::Write;
-    struct Fnv<'a>(&'a mut u64);
-    impl Write for Fnv<'_> {
+    let _ = write!(Fnv(h), "{v:?}");
+}
+
+/// Hashes `{event:?}`, with the frequent events written out by hand to the
+/// same text: formatting was most of the cost of the hash.
+fn hash_event(h: &mut u64, event: &Event) {
+    use core::fmt::Write;
+    let Event { t_us, kind } = *event;
+    let mut w = Fnv(h);
+    w.bytes(b"Event { t_us: ");
+    w.int(t_us);
+    w.bytes(b", kind: ");
+    match kind {
+        EventKind::Imu { gyro, accel } => {
+            w.bytes(b"Imu { gyro: ");
+            hash_floats(&mut w, &gyro);
+            w.bytes(b", accel: ");
+            hash_floats(&mut w, &accel);
+            w.bytes(b" }");
+        }
+        EventKind::Tick => w.bytes(b"Tick"),
+        EventKind::Rc { channels } => {
+            w.bytes(b"Rc { channels: ");
+            w.list(&channels, |w, &c| w.int(c.into()));
+            w.bytes(b" }");
+        }
+        EventKind::MotorTelemetry { erpm } => {
+            w.bytes(b"MotorTelemetry { erpm: ");
+            w.list(&erpm, |w, e| match *e {
+                Some(e) => {
+                    w.bytes(b"Some(");
+                    w.int(e.into());
+                    w.bytes(b")");
+                }
+                None => w.bytes(b"None"),
+            });
+            w.bytes(b" }");
+        }
+        _ => {
+            let _ = write!(w, "{kind:?}");
+        }
+    }
+    w.bytes(b" }");
+}
+
+/// Hashes `{fx:?}`, with the effects nearly every step has written out by
+/// hand.
+fn hash_effects(h: &mut u64, fx: &[Effect]) {
+    use core::fmt::Write;
+    Fnv(h).list(fx, |w, e| match *e {
+        Effect::Motors(m) => {
+            w.bytes(b"Motors(");
+            w.list(&m, |w, &v| w.int(v.into()));
+            w.bytes(b")");
+        }
+        Effect::Led(on) => w.bytes(if on { b"Led(true)" } else { b"Led(false)" }),
+        Effect::Beeper(on) => w.bytes(if on { b"Beeper(true)" } else { b"Beeper(false)" }),
+        _ => {
+            let _ = write!(w, "{e:?}");
+        }
+    });
+}
+
+/// Writes `{v:?}` for three floats, each from a per-thread cache of the
+/// text of recent values (IMU samples are quantized, so values repeat).
+fn hash_floats(w: &mut Fnv, v: &[f32; 3]) {
+    use core::fmt::Write;
+    #[derive(Clone, Copy)]
+    struct Entry {
+        bits: u32,
+        len: u8,
+        text: [u8; 27],
+    }
+    struct Buf<'a>(&'a mut Entry);
+    impl Write for Buf<'_> {
         fn write_str(&mut self, s: &str) -> core::fmt::Result {
-            for b in s.bytes() {
-                *self.0 = (*self.0 ^ b as u64).wrapping_mul(0x100_0000_01b3);
-            }
+            let at = self.0.len as usize;
+            let dst = self.0.text.get_mut(at..at + s.len()).ok_or(core::fmt::Error)?;
+            dst.copy_from_slice(s.as_bytes());
+            self.0.len += s.len() as u8;
             Ok(())
         }
     }
-    let _ = write!(Fnv(h), "{v:?}");
+    const SLOTS: usize = 4096;
+    thread_local! {
+        static CACHE: std::cell::RefCell<Vec<Entry>> = std::cell::RefCell::new(vec![Entry { bits: 0, len: 0, text: [0; 27] }; SLOTS]);
+    }
+    CACHE.with_borrow_mut(|cache| {
+        w.list(v, |w, x| {
+            let bits = x.to_bits();
+            let e = &mut cache[(bits.wrapping_mul(0x9E37_79B9) >> 20) as usize % SLOTS];
+            if e.len == 0 || e.bits != bits {
+                *e = Entry { bits, len: 0, text: [0; 27] };
+                write!(Buf(e), "{x:?}").expect("an f32's text fits in 27 bytes");
+            }
+            w.bytes(&e.text[..e.len as usize]);
+        });
+    });
 }
 
 /// A resonance rung by noise: a damped oscillator at `hz` with quality
@@ -753,15 +898,46 @@ struct Resonance {
 }
 
 impl Resonance {
-    fn step(&mut self, hz: f32, q: f32, dt: f32, r: &mut Rng) -> Vec3 {
+    /// `memo` keeps the last substep's coefficients, which both
+    /// oscillators and most samples share.
+    fn step(&mut self, hz: f32, q: f32, dt: f32, r: &mut Rng, memo: &mut Option<Substep>) -> Vec3 {
         let n = libm::ceilf(dt * hz * 16.0).max(1.0);
+        let dt = dt / n;
+        let key = [hz, q, dt].map(f32::to_bits);
+        let k = match memo {
+            Some(k) if k.key == key => *k,
+            _ => *memo.insert(Substep::new(hz, q, dt)),
+        };
         for _ in 0..n as u32 {
-            self.substep(hz, q, dt / n, r);
+            self.substep(&k, r);
         }
         self.x
     }
 
-    fn substep(&mut self, hz: f32, q: f32, dt: f32, r: &mut Rng) {
+    fn substep(&mut self, k: &Substep, r: &mut Rng) {
+        let (x, v) = (self.x, self.v);
+        self.x = (x * k.c + (v + x * k.sigma) * k.s_wd) * k.decay;
+        self.v = (v * k.c - (v * k.sigma + x * k.w2) * k.s_wd) * k.decay;
+        self.v += Vec3::new(r.normal(), r.normal(), r.normal()) * k.kick;
+    }
+}
+
+/// A resonance substep's coefficients, for its `hz`, `q` and length (the
+/// `key`, as bits).
+#[derive(Clone, Copy, Debug)]
+struct Substep {
+    key: [u32; 3],
+    sigma: f32,
+    w2: f32,
+    /// sin(wd dt) / wd.
+    s_wd: f32,
+    c: f32,
+    decay: f32,
+    kick: f32,
+}
+
+impl Substep {
+    fn new(hz: f32, q: f32, dt: f32) -> Self {
         let w = TAU * hz;
         let sigma = w / (2.0 * q);
         let wd = libm::sqrtf(w * w - sigma * sigma);
@@ -769,10 +945,7 @@ impl Resonance {
         let (s, c) = (sinf(wd * dt), cosf(wd * dt));
         // Half its energy is in the velocity, so this leaves x at unit RMS.
         let kick = w * libm::sqrtf(2.0 * (1.0 - decay * decay));
-        let (x, v) = (self.x, self.v);
-        self.x = (x * c + (v + x * sigma) * (s / wd)) * decay;
-        self.v = (v * c - (v * sigma + x * (w * w)) * (s / wd)) * decay;
-        self.v += Vec3::new(r.normal(), r.normal(), r.normal()) * kick;
+        Substep { key: [hz, q, dt].map(f32::to_bits), sigma, w2: w * w, s_wd: s / wd, c, decay, kick }
     }
 }
 
@@ -785,7 +958,7 @@ mod tests {
     /// `freqs` (averaged over 0.5 s stretches, as a DFT over the uneven
     /// sample times).
     fn ring(hz: f32, q: f32, min_us: u64, max_us: u64, secs: f64, freqs: &[f64]) -> (f64, Vec<f64>) {
-        let (mut res, mut noise, mut timing) = (Resonance::default(), Rng::new(1), Rng::new(2));
+        let (mut res, mut noise, mut timing, mut memo) = (Resonance::default(), Rng::new(1), Rng::new(2), None);
         let (mut t, mut sq, mut n) = (0.0f64, 0.0f64, 0u64);
         let mut power = vec![0.0; freqs.len()];
         let mut bins = vec![(0.0f64, 0.0f64); freqs.len()];
@@ -793,7 +966,7 @@ mod tests {
         while t < secs {
             let dt = timing.range_u64(min_us, max_us + 1) as f64 * 1e-6;
             t += dt;
-            let x = res.step(hz, q, dt as f32, &mut noise).x as f64;
+            let x = res.step(hz, q, dt as f32, &mut noise, &mut memo).x as f64;
             assert!(x.is_finite(), "diverged at {t:.3} s");
             if t < 1.0 {
                 continue; // settling
@@ -814,6 +987,47 @@ mod tests {
             }
         }
         ((sq / n as f64).sqrt(), power)
+    }
+
+    /// The trace hash writes IMU events and the common effects out by hand;
+    /// it must hash exactly their Debug text, or every trace hash changes.
+    #[test]
+    fn trace_hash_matches_debug_text() {
+        use ironloop_fc::{Command, Effects, FlightMode};
+        let odd = [0.0, -0.0, f32::NAN, f32::INFINITY, f32::NEG_INFINITY, 1e-5, 1e-4, -1.5e-40, 1e16, 9.9e15, 123456.78, f32::MAX, f32::MIN_POSITIVE, 0.1];
+        let mut r = Rng::new(3);
+        let f = |r: &mut Rng| if r.chance(0.5) { *r.pick(&odd) } else { f32::from_bits(r.next_u64() as u32) };
+        for i in 0..50_000u64 {
+            let kind = match i % 8 {
+                0 => EventKind::Battery { volts: f(&mut r), amps: f(&mut r) },
+                1 => EventKind::Command(Command::RebootToBootloader),
+                2 => EventKind::Tick,
+                3 => EventKind::Rc { channels: core::array::from_fn(|_| r.next_u64() as u16 >> r.range_u64(0, 16)) },
+                4 => EventKind::MotorTelemetry { erpm: core::array::from_fn(|_| r.chance(0.7).then(|| r.next_u64() as u32 >> r.range_u64(0, 32))) },
+                _ => EventKind::Imu { gyro: [f(&mut r), f(&mut r), f(&mut r)], accel: [f(&mut r), f(&mut r), f(&mut r)] },
+            };
+            let event = Event { t_us: r.next_u64() >> r.range_u64(0, 64), kind };
+            let (mut fast, mut slow) = (i, i);
+            hash_event(&mut fast, &event);
+            hash_debug(&mut slow, &event);
+            assert_eq!(fast, slow, "{event:?}");
+
+            let mut fx = Effects::new();
+            for _ in 0..r.range_u64(0, 5) {
+                let e = match r.range_u64(0, 6) {
+                    0 | 1 => Effect::Motors([0, 48, r.range_u64(0, 2048) as u16, r.next_u64() as u16]),
+                    2 => Effect::Led(r.chance(0.5)),
+                    3 => Effect::Beeper(r.chance(0.5)),
+                    4 => Effect::Notice(Notice::Armed(FlightMode::Angle)),
+                    _ => Effect::RebootToBootloader,
+                };
+                let _ = fx.push(e);
+            }
+            let (mut fast, mut slow) = (i, i);
+            hash_effects(&mut fast, &fx);
+            hash_debug(&mut slow, &fx);
+            assert_eq!(fast, slow, "{fx:?}");
+        }
     }
 
     /// The frame resonance once grew without bound when the sample interval

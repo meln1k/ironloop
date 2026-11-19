@@ -29,9 +29,10 @@ def main():
     if saved:
         out = open(saved).read()
     else:
-        subprocess.run(["cargo", "build", "-q", "--release", "-p", "ironloop-sim", "--bin", "dst"], check=True)
+        # One long sweep: the dst profile's slower link pays for itself.
+        subprocess.run(["cargo", "build", "-q", "--profile", "dst", "-p", "ironloop-sim", "--bin", "dst"], check=True)
         out = subprocess.run(
-            ["./target/release/dst", "--seeds", str(n), "--start", str(start), "--list-failures"],
+            ["./target/dst/dst", "--seeds", str(n), "--start", str(start), "--list-failures"],
             capture_output=True,
             text=True,
         ).stdout

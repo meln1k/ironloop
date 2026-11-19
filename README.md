@@ -31,9 +31,10 @@ Airmode engages above 25% throttle. Arming (channel 5 high) needs: gyro calibrat
 cargo test -p ironloop-fc -p ironloop-sim                   # unit tests + 24-seed DST sweep
 (cd firmware/mobula6 && cargo build --release)              # board firmware (needs thumbv7em-none-eabihf)
 cargo run --release -p ironloop-sim --bin dst -- --seeds 1000
+cargo run --profile dst -p ironloop-sim --bin dst -- --seeds 100000   # long sweeps: fat LTO, ~6% faster, slower to build
 cargo run --release -p ironloop-sim --bin dst -- --seed 626 --trace   # replay one seed with a 20 Hz flight log
 cargo run --release -p ironloop-sim --bin dst -- --properties
-scripts/mutants.py 300                                      # every reintroduced bug must fail a check
+scripts/mutants.py 300                                      # every reintroduced bug must fail a check (--quick: stop each at its first catch)
 scripts/failing-seeds.py 4000                               # regenerate crates/ironloop-sim/FAILING_SEEDS.md
 ```
 

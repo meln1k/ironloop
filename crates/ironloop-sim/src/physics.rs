@@ -310,6 +310,7 @@ impl World {
         // Motors: first-order speed response toward the commanded speed,
         // which scales with battery voltage (KV × volts).
         let mut amps = b.base_amps;
+        let (k_up, k_down) = (1.0 - expf(-dt / f.tau_up), 1.0 - expf(-dt / f.tau_down));
         for m in &mut self.motors {
             let signal = now_us.saturating_sub(m.last_frame_us) < ESC_SIGNAL_TIMEOUT_US;
             let cmd = if !signal || m.command < DSHOT_MIN || b.absent {
@@ -324,9 +325,8 @@ impl World {
             };
             let drive = esc(m, f, cmd, now_us, health > 0.0);
             let target = drive * f.omega_max * (b.volts / f.v_ref).max(0.0) * health;
-            let tau = if target > m.omega { f.tau_up } else { f.tau_down };
-            m.omega += (target - m.omega) * (1.0 - expf(-dt / tau));
-            m.phase = (m.phase + m.omega * dt) % (2.0 * core::f32::consts::PI);
+            m.omega += (target - m.omega) * if target > m.omega { k_up } else { k_down };
+            m.phase = wrap_phase(m.phase + m.omega * dt);
             let r = m.omega / f.omega_max;
             amps += f.motor_max_amps * r * r * r;
         }
@@ -417,6 +417,20 @@ impl World {
 
     pub fn altitude(&self) -> f32 {
         -self.body.pos.z
+    }
+}
+
+/// `phase % TAU`, without the slow `fmodf` for the usual phase less than
+/// two turns: below TAU the remainder is the phase itself, and up to 2 TAU
+/// subtracting TAU is exact (Sterbenz), as `fmodf` is.
+fn wrap_phase(phase: f32) -> f32 {
+    const TAU: f32 = 2.0 * core::f32::consts::PI;
+    if (0.0..TAU).contains(&phase) {
+        phase
+    } else if (TAU..2.0 * TAU).contains(&phase) {
+        phase - TAU
+    } else {
+        phase % TAU
     }
 }
 
