@@ -129,6 +129,9 @@ MUTANTS = {
     # Control quality.
     "rate curve 40% low": [(CONTROL, "let dps = (200.0 * r.rc_rate * x * super_factor)", "let dps = (120.0 * r.rc_rate * x * super_factor)")],
     "roll/pitch D ten times too high (oscillates)": [(CFG, "d: 0.000525, ff: 0.0 }", "d: 0.00525, ff: 0.0 }")],
+    # Filtering: noise the filters let through jitters the motors.
+    "RPM filter off": [(CFG, "rpm_filter_harmonics: 3,", "rpm_filter_harmonics: 0,")],
+    "D-term low-pass at 250 Hz": [(CFG, "dterm_lpf_hz: 90.0,", "dterm_lpf_hz: 250.0,")],
     # The checker itself: a monitor bug that hides real firmware failures.
     "monitor: any fault during a link loss excuses the failsafe checks": [(
         MON,

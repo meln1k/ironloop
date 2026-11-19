@@ -168,6 +168,8 @@ fn heading_and_imu_rate_do_not_change_the_outcome() {
         for hz in [1600.0, 3200.0, 8000.0] {
             let mut rate = sc.clone();
             rate.imu.odr_hz = hz;
+            // A chip whose filters scale with its rate, like the BMI270's.
+            rate.imu.aaf_hz = [751.0 * hz / 3200.0, 0.0];
             let r = run_scenario(rate);
             assert_eq!(outcome(&r), outcome(&base), "seed {} at {hz} Hz", sc.seed);
         }

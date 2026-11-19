@@ -28,6 +28,10 @@ pub const REQ_IMU_STOP_US: u64 = 30_000;
 pub const REQ_IMU_TOLERATE_US: u64 = 10_000;
 /// While armed the ESCs must get a command at least this often.
 pub const REQ_ESC_FEED_US: u64 = 5_000;
+/// In steady flight, motor commands jitter above this frequency (Hz)...
+pub const REQ_QUIET_ABOVE_HZ: f32 = 30.0;
+/// ...by at most this RMS fraction of full range.
+pub const REQ_QUIET_RMS: f32 = 0.075;
 /// Arming is never allowed tilted further than this (rad).
 pub const REQ_ARM_TILT: f32 = 33.0 * core::f32::consts::PI / 180.0;
 /// Tilted past this (rad) on the ground, the quad has tipped over: lying

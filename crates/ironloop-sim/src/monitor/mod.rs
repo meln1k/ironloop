@@ -97,6 +97,7 @@ pub static PROPERTIES: &[&Property] = &[
     &script::SETTLES,
     &flight::SAG_COMPENSATED,
     &script::ANGLE_TRACKS,
+    &flight::MOTORS_QUIET,
 ];
 
 #[derive(Clone, Debug, PartialEq)]
@@ -114,6 +115,8 @@ pub struct Stats {
     pub max_impact_g: f32,
     pub max_touchdown: f32,
     pub max_tilt_angle_mode_deg: f32,
+    /// Worst motor-command jitter in steady flight (RMS fraction of full).
+    pub max_motor_noise: f32,
     pub armed_us: u64,
     /// Armed and more than 0.3 m off the ground.
     pub airborne_us: u64,

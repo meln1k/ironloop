@@ -21,18 +21,39 @@ pub struct ImuModel {
     pub gyro_bias_drift: Vec3,
     pub accel_bias: Vec3,
     pub gyro_scale: Vec3,
-    /// Prop-imbalance vibration at full speed (rad/s and m/s²).
+    /// Prop-imbalance vibration at full speed (rad/s and m/s²), at shaft
+    /// speed (and twice it on yaw).
     pub vib_gyro: f32,
     pub vib_accel: f32,
+    /// Blade-pass vibration at full speed (rad/s and m/s²), at three times
+    /// shaft speed for the tri-blade props: each blade passing the duct
+    /// and the arm pulses the thrust, balanced or not.
+    pub blade_gyro: f32,
+    pub blade_accel: f32,
+    /// The chip's filters ahead of its sampler: 3 dB points of
+    /// second-order Butterworth low-passes, 0 for none. Every vibration
+    /// tone goes through them at its true frequency before it is sampled,
+    /// so a tone above half the sample rate is cut first and aliased after,
+    /// as on the chip.
+    pub aaf_hz: [f32; 2],
+    /// A frame resonance (Hz and Q) the airflow keeps ringing: narrowband
+    /// noise at a fixed frequency, so the RPM filter cannot follow it.
+    pub frame_hz: f32,
+    pub frame_q: f32,
+    /// Its RMS size at full thrust (rad/s and m/s²); 0 disables it.
+    pub frame_gyro: f32,
+    pub frame_accel: f32,
     pub gyro_range: f32,
     pub accel_range: f32,
     /// Time from the data-ready timestamp to the sample's step: the SPI
     /// read plus waiting for the control task, µs. Events that arrive in
     /// between wait for it, since the same task steps them.
     pub read_delay_us: u64,
-    /// The chip's own digital low-pass (Hz, two first-order stages): gyro
-    /// and accelerometer data lag the motion by about 1/(pi * f) seconds
-    /// before the firmware sees them. 0 disables it.
+    /// The delay of the chip's own filters on the body's motion and on
+    /// sensor noise (Hz, two first-order stages after sampling): gyro and
+    /// accelerometer data lag the motion by about 1/(pi * f) seconds before
+    /// the firmware sees them. Vibration goes through `aaf_hz` instead. 0
+    /// disables it.
     pub chip_lpf_hz: f32,
     /// Sign of each sensor axis as the firmware receives it, for gyro and
     /// accel alike. A -1 is a build mistake no `ImuAlignment` describes: a
@@ -56,6 +77,13 @@ impl Default for ImuModel {
             gyro_scale: Vec3::new(1.0, 1.0, 1.0),
             vib_gyro: 0.15,
             vib_accel: 6.0,
+            blade_gyro: 0.1,
+            blade_accel: 4.0,
+            aaf_hz: [751.0, 0.0],
+            frame_hz: 300.0,
+            frame_q: 10.0,
+            frame_gyro: 0.04,
+            frame_accel: 1.5,
             gyro_range: 2000f32.to_radians(),
             accel_range: 16.0 * 9.80665,
             read_delay_us: 110,
@@ -501,13 +529,23 @@ impl Scenario {
 
         // IMU: noise, bias, vibration, rate.
         let imu = &mut self.imu;
-        imu.odr_hz = *r.pick(&[1600.0, 3200.0, 3200.0, 4000.0]);
+        // The board has one of two chips, at the rate it sets up or at
+        // another rate the chip offers. The filters ahead of the sampler
+        // are the ones the board leaves at their defaults: the BMI270's
+        // normal mode, about 751 Hz at 3.2 kHz and scaling with the rate,
+        // and the ICM-42688's anti-alias filter (585 Hz) plus its UI filter
+        // (max(400 Hz, rate) / 4).
+        let (icm, odr) = *r.pick(&[(false, 3200.0), (true, 2000.0), (false, 1600.0), (true, 4000.0)]);
+        imu.odr_hz = odr;
+        if icm {
+            tags.push("icm".into());
+            imu.aaf_hz = [585.0, odr.max(400.0) / 4.0];
+        } else {
+            imu.aaf_hz = [751.0 * odr / 3200.0, 0.0];
+        }
         imu.jitter_us = r.range_u64(2, 40);
         imu.read_delay_us = r.range_u64(80, 160);
-        // The chip's own filters as the board sets them up: the BMI270's
-        // normal mode at 3.2 kHz is about 751 Hz, the ICM-42688's UI filter
-        // at 2 kHz about 500 Hz plus its anti-alias filter. That delays the
-        // gyro by about 0.4-1 ms and leaves most of the prop vibration in.
+        // Those filters delay the gyro by about 0.4-1 ms.
         imu.chip_lpf_hz = r.range(300.0, 750.0);
         imu.gyro_noise *= r.range(0.5, 2.5);
         imu.accel_noise *= r.range(0.5, 2.5);
@@ -526,6 +564,20 @@ impl Scenario {
             imu.vib_gyro *= vib;
             imu.vib_accel *= vib;
         }
+        // Drawn from its own stream so that adding it left every other
+        // seed's scenario as it was.
+        let v = &mut Rng::fork(self.seed, "vibration");
+        let blade = v.range(0.5, 2.0);
+        imu.blade_gyro *= blade;
+        imu.blade_accel *= blade;
+        // Nobody has measured this frame's resonances: anywhere from below
+        // the gyro low-pass to well above it, a few to twenty times sharper
+        // than wide.
+        imu.frame_hz = v.range(150.0, 600.0);
+        imu.frame_q = v.range(5.0, 20.0);
+        let frame = v.range(0.3, 2.0);
+        imu.frame_gyro *= frame;
+        imu.frame_accel *= frame;
 
         self.rc.rate_hz = *r.pick(&[50.0, 150.0, 250.0, 500.0]);
         self.rc.jitter_us = r.range_u64(50, 1500);

@@ -30,6 +30,11 @@ pub static SAG_COMPENSATED: Property = Property {
     doc: "[flight] On a sagging pack the averaged motor speed matches the throttle stick within 15%.",
 };
 
+pub static MOTORS_QUIET: Property = Property {
+    name: "motors_quiet",
+    doc: "[flight] In steady hover or cruise, no motor command jitters above 30 Hz by more than 7.5% of full range (RMS over 0.5 s).",
+};
+
 #[derive(Clone, Debug, Default)]
 pub struct Flight {
     est_bad_since: Option<u64>,
@@ -38,6 +43,17 @@ pub struct Flight {
     /// True pack voltage averaged over about 0.5 s.
     volts_avg: f32,
     sag: SagWindow,
+    quiet: Option<QuietWindow>,
+}
+
+/// The motor-noise check's window, over IMU steps.
+#[derive(Clone, Copy, Debug)]
+struct QuietWindow {
+    secs: f32,
+    /// Each motor's command (fraction of full) low-passed at 30 Hz...
+    slow: [f32; 4],
+    /// ...and the integral of the square of what is left above it.
+    sq: [f32; 4],
 }
 
 /// The sag check's window, integrated over IMU steps.
@@ -106,6 +122,7 @@ impl Flight {
         }
 
         self.sag(cx, link, v);
+        self.quiet(cx, v);
 
         v.stats.max_impact_g = v.stats.max_impact_g.max(world.body.impact / 9.80665);
         if let Some((speed, _)) = cx.touchdown {
@@ -163,6 +180,46 @@ impl Flight {
                 v.fail(cx.t, &SAG_COMPENSATED, format!("motors at {:.0}% of what the stick asks at {volts:.2} V", ratio * 100.0));
             }
             self.sag = SagWindow::default();
+        }
+    }
+
+    /// Gyro noise the filters let through reaches the motors as jitter,
+    /// which heats them and wastes the pack. In steady flight the commands
+    /// only follow slow corrections.
+    fn quiet(&mut self, cx: &Cx, v: &mut Verdicts) {
+        if !cx.imu_step {
+            return;
+        }
+        let after = cx.after;
+        let steady = cx.sc.segment_at(cx.t).is_some_and(|s| {
+            matches!(s.action, Action::Hover { .. } | Action::Cruise { .. }) && cx.t >= s.start_us + 1_000_000
+        });
+        let judged = steady
+            && cx.flying
+            && !cx.excused
+            && !cx.wild
+            && after.failsafe == FailsafeStage::None
+            && after.motors.iter().all(|&m| m > DSHOT_MIN + 60 && m < DSHOT_MAX - 60);
+        if !judged {
+            self.quiet = None;
+            return;
+        }
+        let frac = after.motors.map(|m| (m - DSHOT_MIN) as f32 / (DSHOT_MAX - DSHOT_MIN) as f32);
+        let w = self.quiet.get_or_insert(QuietWindow { secs: 0.0, slow: frac, sq: [0.0; 4] });
+        let k = cx.imu_dt / (cx.imu_dt + 1.0 / (2.0 * core::f32::consts::PI * REQ_QUIET_ABOVE_HZ));
+        for i in 0..4 {
+            w.slow[i] += (frac[i] - w.slow[i]) * k;
+            w.sq[i] += (frac[i] - w.slow[i]) * (frac[i] - w.slow[i]) * cx.imu_dt;
+        }
+        w.secs += cx.imu_dt;
+        if w.secs >= 0.5 {
+            v.live(&MOTORS_QUIET);
+            let rms = w.sq.iter().fold(0.0f32, |a, &s| a.max(libm::sqrtf(s / w.secs)));
+            v.stats.max_motor_noise = v.stats.max_motor_noise.max(rms);
+            if rms > REQ_QUIET_RMS {
+                v.fail(cx.t, &MOTORS_QUIET, format!("motor command jitter {:.1}% RMS above {REQ_QUIET_ABOVE_HZ} Hz", rms * 100.0));
+            }
+            *w = QuietWindow { secs: 0.0, slow: w.slow, sq: [0.0; 4] };
         }
     }
 }

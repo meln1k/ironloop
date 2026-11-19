@@ -4,6 +4,7 @@
 //! and the firmware's `step` runs on each delivered event. Given a scenario,
 //! the run is a pure function of its seed.
 
+use core::f32::consts::{SQRT_2, TAU};
 use std::cmp::Reverse;
 use std::collections::{BinaryHeap, VecDeque};
 
@@ -73,9 +74,15 @@ pub struct Sim {
     rng_esc: Rng,
     pilot: Pilot,
     last_imu_raw: Option<([f32; 3], [f32; 3])>,
-    /// The IMU chip's low-pass state: two stages each for gyro and accel,
-    /// and when it last ran.
-    chip_lpf: Option<([Vec3; 2], [Vec3; 2], u64)>,
+    /// When the IMU last sampled.
+    imu_sampled_us: Option<u64>,
+    /// The IMU chip's low-pass state: two stages each for gyro and accel.
+    chip_lpf: Option<([Vec3; 2], [Vec3; 2])>,
+    /// The frame resonance's oscillator for gyro and accel: position and
+    /// velocity, at unit RMS.
+    frame: [[Vec3; 2]; 2],
+    /// Its own stream, so the frame's noise does not shift the sensor's.
+    rng_vib: Rng,
     /// A clock jump back the firmware's next step will see.
     clock_back_us: u64,
     /// Manual control from the visualizer replaces the virtual pilot.
@@ -132,7 +139,10 @@ impl Sim {
             rng_esc: Rng::fork(seed, "esc"),
             pilot: Pilot::default(),
             last_imu_raw: None,
+            imu_sampled_us: None,
             chip_lpf: None,
+            frame: [[Vec3::ZERO; 2]; 2],
+            rng_vib: Rng::fork(seed, "vib"),
             clock_back_us: 0,
             manual: None,
             sticks: Sticks::default(),
@@ -384,32 +394,80 @@ impl Sim {
         let drift = imu.gyro_bias_drift * ts.min(60.0);
         let mut gyro = w.body.omega.mul_elem(imu.gyro_scale) + imu.gyro_bias + drift;
         let mut accel = w.specific_force() + imu.accel_bias;
-        // Prop imbalance vibration at each motor's shaft frequency, at the
-        // shaft angle at the sample time. (Reading the angle from the 250 µs
-        // physics grid instead makes the IMU see the same few angles over
-        // and over, which turns vibration into a fake constant bias.)
-        let since_grid = (t - self.physics_us) as f32 * 1e-6;
-        for (i, m) in w.motors.iter().enumerate() {
-            let r = m.omega / w.frame.omega_max;
-            let k = r * r;
-            let ph = m.phase + m.omega * since_grid + i as f32;
-            gyro += Vec3::new(sinf(ph), cosf(ph), 0.3 * sinf(2.0 * ph)) * (imu.vib_gyro * k);
-            accel += Vec3::new(cosf(ph), sinf(ph), 1.5 * sinf(ph + 0.7)) * (imu.vib_accel * k);
-        }
         let r = &mut self.rng_imu;
         gyro += Vec3::new(r.normal(), r.normal(), r.normal()) * imu.gyro_noise;
         accel += Vec3::new(r.normal(), r.normal(), r.normal()) * imu.accel_noise;
         // The chip filters what it samples before the firmware reads it.
+        let dt = self.imu_sampled_us.replace(t).map_or(0.0, |last| (t - last) as f32 * 1e-6);
         if imu.chip_lpf_hz > 0.0 {
-            let (g, a, last) = self.chip_lpf.get_or_insert(([gyro; 2], [accel; 2], t));
-            let dt = (t - *last) as f32 * 1e-6;
-            *last = t;
-            let k = dt / (dt + 1.0 / (2.0 * core::f32::consts::PI * imu.chip_lpf_hz));
+            let (g, a) = self.chip_lpf.get_or_insert(([gyro; 2], [accel; 2]));
+            let k = dt / (dt + 1.0 / (TAU * imu.chip_lpf_hz));
             g[0] += (gyro - g[0]) * k;
             g[1] += (g[0] - g[1]) * k;
             a[0] += (accel - a[0]) * k;
             a[1] += (a[0] - a[1]) * k;
             (gyro, accel) = (g[1], a[1]);
+        }
+
+        // Vibration, as tones at each motor's shaft speed and its
+        // harmonics, at the shaft angle at the sample time. (Reading the
+        // angle from the 250 µs physics grid instead makes the IMU see the
+        // same few angles over and over, which turns vibration into a fake
+        // constant bias.) Each tone passes the chip's filters at its true
+        // frequency before it is sampled, so a tone above half the sample
+        // rate arrives cut and then aliased, as on the chip.
+        let chip = |hz: f32| {
+            let mut gain = 1.0;
+            let mut lag = 0.0;
+            for fc in imu.aaf_hz.into_iter().filter(|&fc| fc > 0.0) {
+                let (re, im) = (1.0 - (hz / fc) * (hz / fc), SQRT_2 * hz / fc);
+                gain /= libm::hypotf(re, im);
+                lag += libm::atan2f(im, re);
+            }
+            (gain, lag)
+        };
+        let since_grid = (t - self.physics_us) as f32 * 1e-6;
+        let mut thrust = 0.0;
+        for (i, m) in w.motors.iter().enumerate() {
+            let r = m.omega / w.frame.omega_max;
+            let k = r * r;
+            thrust += k / 4.0;
+            let ph = m.phase + m.omega * since_grid + i as f32;
+            let tone = |h: f32| {
+                let (gain, lag) = chip(h * m.omega / TAU);
+                (h * ph - lag, gain * k)
+            };
+            // Prop imbalance at shaft speed, twice it on yaw.
+            let (p1, k1) = tone(1.0);
+            let (p2, k2) = tone(2.0);
+            gyro += Vec3::new(sinf(p1) * k1, cosf(p1) * k1, 0.3 * sinf(p2) * k2) * imu.vib_gyro;
+            accel += Vec3::new(cosf(p1), sinf(p1), 1.5 * sinf(p1 + 0.7)) * (imu.vib_accel * k1);
+            // Blade pass: mostly thrust pulses, so along z on the
+            // accelerometer, and roll and pitch from the arm they act on.
+            let (p3, k3) = tone(3.0);
+            gyro += Vec3::new(sinf(p3), cosf(p3), 0.5 * sinf(p3 + 1.1)) * (imu.blade_gyro * k3);
+            accel += Vec3::new(0.3 * cosf(p3), 0.3 * sinf(p3), sinf(p3 + 0.4)) * (imu.blade_accel * k3);
+        }
+        // A frame resonance rung by the airflow: a damped oscillator kicked
+        // by white noise, stepped exactly over each sample interval (so it
+        // stays stable whatever the timing), with unit RMS, scaled to its
+        // size at this thrust.
+        if (imu.frame_gyro > 0.0 || imu.frame_accel > 0.0) && dt > 0.0 {
+            let w = TAU * imu.frame_hz;
+            let sigma = w / (2.0 * imu.frame_q);
+            let wd = libm::sqrtf(w * w - sigma * sigma);
+            let decay = libm::expf(-sigma * dt);
+            let (s, c) = (sinf(wd * dt), cosf(wd * dt));
+            // Half its energy is in the velocity, so this leaves x at unit RMS.
+            let kick = w * libm::sqrtf(2.0 * (1.0 - decay * decay));
+            let r = &mut self.rng_vib;
+            for [x, v] in self.frame.iter_mut() {
+                (*x, *v) = ((*x * c + (*v + *x * sigma) * (s / wd)) * decay, (*v * c - (*v * sigma + *x * (w * w)) * (s / wd)) * decay);
+                *v += Vec3::new(r.normal(), r.normal(), r.normal()) * kick;
+            }
+            let size = thrust * chip(imu.frame_hz).0;
+            gyro += self.frame[0][0] * (imu.frame_gyro * size);
+            accel += self.frame[1][0] * (imu.frame_accel * size);
         }
 
         let to_sensor = |v: Vec3| match imu.mount {
