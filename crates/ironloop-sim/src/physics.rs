@@ -201,9 +201,9 @@ impl Wind {
         let a = expf(-dt / self.gust_tau);
         let k = self.gust_sigma * sqrtf(1.0 - a * a);
         self.gust = Vec3::new(
-            a * self.gust.x + k * rng.normal(),
-            a * self.gust.y + k * rng.normal(),
-            a * self.gust.z + 0.3 * k * rng.normal(),
+            a * self.gust.x + k * rng.gaussian(),
+            a * self.gust.y + k * rng.gaussian(),
+            a * self.gust.z + 0.3 * k * rng.gaussian(),
         );
     }
 }

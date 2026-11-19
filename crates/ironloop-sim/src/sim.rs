@@ -82,7 +82,7 @@ pub struct Sim {
     /// The last frame resonance substep's coefficients.
     frame_substep: Option<Substep>,
     /// Each motor's last vibration tones' filter response, by its speed.
-    tone_memo: [Option<([u32; 3], [(f32, f32); 3])>; 4],
+    tone_memo: [Option<([u32; 3], [(f32, Turn); 3])>; 4],
     /// Its own stream, so the frame's noise does not shift the sensor's.
     rng_vib: Rng,
     /// A clock jump back the firmware's next step will see.
@@ -325,7 +325,7 @@ impl Sim {
                 let volts = if b.absent {
                     0.05 + 0.02 * self.rng_esc.f32()
                 } else {
-                    ((b.volts + 0.01 * self.rng_esc.normal()) * self.sc.vbat_gain * 100.0).round() / 100.0
+                    ((b.volts + 0.01 * self.rng_esc.gaussian()) * self.sc.vbat_gain * 100.0).round() / 100.0
                 };
                 // The board corrects the Mobula6 current sensor's 25% error.
                 let amps = b.amps;
@@ -344,7 +344,7 @@ impl Sim {
                         // it as a GCR reply. A glitch on the wire adds two
                         // edges; the checksum rejects most of those, but
                         // about 1% read as a wrong eRPM.
-                        let noise = 1.0 + 0.01 * self.rng_esc.normal();
+                        let noise = 1.0 + 0.01 * self.rng_esc.gaussian();
                         let mut reply = erpm_reply((self.world.erpm(m) as f32 * noise) as u32);
                         if self.rng_esc.chance(self.sc.telemetry_loss) {
                             reply ^= 0b11 << self.rng_esc.range_u64(0, 19);
@@ -410,8 +410,8 @@ impl Sim {
         let mut gyro = w.body.omega.mul_elem(imu.gyro_scale) + imu.gyro_bias + drift;
         let mut accel = w.specific_force() + imu.accel_bias;
         let r = &mut self.rng_imu;
-        gyro += Vec3::new(r.normal(), r.normal(), r.normal()) * imu.gyro_noise;
-        accel += Vec3::new(r.normal(), r.normal(), r.normal()) * imu.accel_noise;
+        gyro += Vec3::new(r.gaussian(), r.gaussian(), r.gaussian()) * imu.gyro_noise;
+        accel += Vec3::new(r.gaussian(), r.gaussian(), r.gaussian()) * imu.accel_noise;
         // The chip filters what it samples before the firmware reads it.
         let dt = self.imu_sampled_us.replace(t).map_or(0.0, |last| (t - last) as f32 * 1e-6);
         if imu.chip_lpf_hz > 0.0 {
@@ -448,26 +448,40 @@ impl Sim {
             let k = r * r;
             thrust += k / 4.0;
             let ph = m.phase + m.omega * since_grid + i as f32;
-            // The filters' response to the three tones only changes with
-            // the motor's speed, which holds still while it is stopped.
+            // The filters' response to the three tones (gain, and the lag as
+            // a rotation) only changes with the motor's speed, which holds
+            // still while it is stopped.
             let key = [m.omega, imu.aaf_hz[0], imu.aaf_hz[1]].map(f32::to_bits);
             let resp = match self.tone_memo[i] {
                 Some((k, resp)) if k == key => resp,
-                _ => self.tone_memo[i].insert((key, [1.0, 2.0, 3.0].map(|h| chip(h * m.omega / TAU)))).1,
+                _ => {
+                    let resp = [1.0, 2.0, 3.0].map(|h| {
+                        let (gain, lag) = chip(h * m.omega / TAU);
+                        let (s, c) = libm::sincosf(lag);
+                        (gain, Turn(c, s))
+                    });
+                    self.tone_memo[i].insert((key, resp)).1
+                }
             };
-            let tone = |h: f32, (gain, lag): (f32, f32)| (h * ph - lag, gain * k);
+            // Each harmonic's angle by rotating the shaft's, then back by
+            // its lag: one sincos per motor instead of eight sin or cos.
+            let (s, c) = libm::sincosf(ph);
+            let a1 = Turn(c, s);
+            let a2 = a1.then(a1);
+            let a3 = a2.then(a1);
+            let tone = |a: Turn, (gain, lag): (f32, Turn)| (a.back(lag), gain * k);
             // Prop imbalance at shaft speed, twice it on yaw.
-            let (p1, k1) = tone(1.0, resp[0]);
-            let (p2, k2) = tone(2.0, resp[1]);
-            let (s1, c1) = (sinf(p1), cosf(p1));
-            gyro += Vec3::new(s1 * k1, c1 * k1, 0.3 * sinf(p2) * k2) * imu.vib_gyro;
-            accel += Vec3::new(c1, s1, 1.5 * sinf(p1 + 0.7)) * (imu.vib_accel * k1);
+            let (p1, k1) = tone(a1, resp[0]);
+            let (p2, k2) = tone(a2, resp[1]);
+            let Turn(c1, s1) = p1;
+            gyro += Vec3::new(s1 * k1, c1 * k1, 0.3 * p2.1 * k2) * imu.vib_gyro;
+            accel += Vec3::new(c1, s1, 1.5 * p1.then(TURN_0_7).1) * (imu.vib_accel * k1);
             // Blade pass: mostly thrust pulses, so along z on the
             // accelerometer, and roll and pitch from the arm they act on.
-            let (p3, k3) = tone(3.0, resp[2]);
-            let (s3, c3) = (sinf(p3), cosf(p3));
-            gyro += Vec3::new(s3, c3, 0.5 * sinf(p3 + 1.1)) * (imu.blade_gyro * k3);
-            accel += Vec3::new(0.3 * c3, 0.3 * s3, sinf(p3 + 0.4)) * (imu.blade_accel * k3);
+            let (p3, k3) = tone(a3, resp[2]);
+            let Turn(c3, s3) = p3;
+            gyro += Vec3::new(s3, c3, 0.5 * p3.then(TURN_1_1).1) * (imu.blade_gyro * k3);
+            accel += Vec3::new(0.3 * c3, 0.3 * s3, p3.then(TURN_0_4).1) * (imu.blade_accel * k3);
         }
         // A frame resonance rung by the airflow, scaled to its size at this
         // thrust.
@@ -738,6 +752,27 @@ struct Task {
     tick_due: bool,
 }
 
+/// An angle as its (cosine, sine).
+#[derive(Clone, Copy, Debug)]
+struct Turn(f32, f32);
+
+impl Turn {
+    /// This angle plus `b`.
+    fn then(self, b: Turn) -> Turn {
+        Turn(self.0 * b.0 - self.1 * b.1, self.1 * b.0 + self.0 * b.1)
+    }
+
+    /// This angle minus `b`.
+    fn back(self, b: Turn) -> Turn {
+        Turn(self.0 * b.0 + self.1 * b.1, self.1 * b.0 - self.0 * b.1)
+    }
+}
+
+/// The fixed phase offsets of the vibration's z components.
+const TURN_0_4: Turn = Turn(0.921_061, 0.389_418_34);
+const TURN_0_7: Turn = Turn(0.764_842_2, 0.644_217_7);
+const TURN_1_1: Turn = Turn(0.453_596_1, 0.891_207_4);
+
 /// FNV-1a over the bytes written to it.
 struct Fnv<'a>(&'a mut u64);
 
@@ -868,7 +903,7 @@ impl Resonance {
         let (x, v) = (self.x, self.v);
         self.x = (x * k.c + (v + x * k.sigma) * k.s_wd) * k.decay;
         self.v = (v * k.c - (v * k.sigma + x * k.w2) * k.s_wd) * k.decay;
-        self.v += Vec3::new(r.normal(), r.normal(), r.normal()) * k.kick;
+        self.v += Vec3::new(r.gaussian(), r.gaussian(), r.gaussian()) * k.kick;
     }
 }
 
