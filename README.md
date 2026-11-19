@@ -170,6 +170,8 @@ OSD over MSP DisplayPort is not implemented yet, and the USB port only prints (t
   2. Flash IronLoop over WebUSB DFU.
   3. Walk the builder through setup and calibration with an LLM that reads live telemetry and explains each step. That means the bench checks above: IMU orientation (tilt the quad and watch the attitude; a quarter-turn mismatch is the build mistake DST seed 146 flies with), motor order and direction, battery voltage scaling, LED and beeper, and eRPM. It should end with a config the builder has confirmed.
 
+  - [ ] **Commands over USB.** Everything below needs the board to take commands, not just print: a small line protocol on the existing CDC-ACM port (or a WebUSB interface beside it). At least `motor N value` (one motor at a time, disarmed only, refused while the arm switch is on or the RC link is up with throttle raised, with a timeout that stops the motor if the browser goes quiet), `dfu` (reboot into the ROM bootloader, disarmed only, so the browser can flash without the BOOT pad or the stick gesture), `gyro N` (stream N raw samples at the full IMU rate for the vibration checks), and the config values the guide sets (`motor_idle`, battery scales, IMU alignment). Commands reach the core as `Event::Command`, so the DST can run them.
+
   - [ ] **Motor order and direction test.** Disarmed and props off, spin one motor at a time (a `motor N value` command over USB), and have the builder confirm which corner moved and which way it turned. Check that the eRPM on that output rises, so each pin's ESC answers. A wrong order or a reversed spin is a build mistake the DST flies (`motors-swapped-*`, `motors-rotated`, `spin-reversed`), and runaway detection only stops it after takeoff.
 
   - [ ] **Idle and startup check.** Props on and the quad strapped down, arm and hold idle on a full pack and again near 3.5 V. Have the builder confirm that no prop spins and stops, check that every motor's eRPM is steady at idle and reaches it within about 0.3 s of arming, and raise `motor_idle` if one stalls. The DST's ESC model guesses the slowest speed Bluejay keeps sync at (3–6% of full); this measures it.
@@ -186,4 +188,8 @@ OSD over MSP DisplayPort is not implemented yet, and the USB port only prints (t
 
   - [ ] **Raw-gyro capture in a tethered hover.** Stream 1–2 s of raw gyro and accelerometer samples at the full IMU rate (about 40 kB/s) with each motor's eRPM, and show the spectrum: the 1×, 2× and 3× (blade pass) lines per motor, any frame resonance, and what the RPM filter leaves. Feed the measured amplitudes and resonance back into the DST's vibration model, which today are guesses.
 
-  This needs a USB interface on the board that takes commands; today it only prints the status line.
+  This needs the commands above; today the board only prints the status line.
+
+- [ ] **USB interrupt priority.** `usb.rs` binds OTG_FS without setting a priority, so it probably runs at P0, the NVIC default, beside the DShot DMA and data-ready interrupts. Its handler can then delay the DShot ISR's switch to input and clip the ESC's eRPM reply. Set it below the control loop (P1) and check on the bench that eRPM keeps arriving on all four motors with the port open (the CPU budget check above).
+
+- [ ] **CRSF telemetry for the first flights.** USB needs a cable, so a tethered hover is blind except for the LED and the beeper. Send telemetry back to the radio on PA2 (USART2 TX; DMA1 stream 6 channel 4 is free): battery (0x08), attitude (0x1E), and a flight-mode string (0x21) carrying the arming blocker, the last disarm reason, the longest step, and lost IMU samples. ELRS sends telemetry at a few frames per second, so keep it to what the pilot needs to read on the radio.
