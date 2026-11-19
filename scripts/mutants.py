@@ -114,6 +114,10 @@ MUTANTS = {
     "runaway fires on a pilot's stick reversal": [(PROTECT, "let runaway = pid_high && spinning && (pushed_back || !flown);", "let runaway = pid_high && spinning;")],
     "crash impact counts drag braking after a power dive": [(PROTECT, "if a > cfg.crash_impact && jolt {", "if a > cfg.crash_impact {")],
     "runaway fires on gyro alone": [(PROTECT, "let runaway = pid_high && spinning && (pushed_back || !flown);", "let runaway = spinning;")],
+    "runaway misses a build wedged on the ground": [(PROTECT, "let stuck = !s.flight.lifted_off && trying", "let stuck = false && trying")],
+    "wedged runaway needs throttle up after a runaway disarm": [(PROTECT, "let trying = throttle > cfg.airmode_throttle || s.runaway_seen;", "let trying = throttle > cfg.airmode_throttle;")],
+    "wedged runaway at low throttle once airmode engaged": [(PROTECT, "let trying = throttle > cfg.airmode_throttle || s.runaway_seen;", "let trying = s.flight.airmode_active || s.runaway_seen;")],
+    "yaw growth counts a ground hit's spin-up": [(PROTECT, "const YAW_HIT_ACCEL: f32 = 400.0;", "const YAW_HIT_ACCEL: f32 = 1e9;")],
     "runaway detection ends after 0.5 s of throttle alone": [
         (PROTECT, "if throttle > cfg.airmode_throttle && s.flight.lifted_off && upright && !pid_high && (!spinning || flown) {", "if throttle > cfg.airmode_throttle {"),
         (CFG, "runaway_deactivate_us: 1_000_000,", "runaway_deactivate_us: 500_000,"),

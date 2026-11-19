@@ -235,6 +235,9 @@ struct Flight {
     /// When the yaw output started pushing hard against the yaw rate, and
     /// how fast it was then (rad/s).
     yaw_pushed_since: Option<(u64, f32)>,
+    /// Since when the frame, never lifted off, has not turned the way the
+    /// controller asks (`runaway_and_crash`).
+    stuck_since_us: Option<u64>,
     runaway_ok_us: u64,
     /// Since arming, the climb estimate has shown the quad rising while
     /// upright: it left the ground under its own thrust.
@@ -331,6 +334,8 @@ pub struct State {
     /// tilt estimate has snapped to the accelerometer, since a tumble on a
     /// build that cannot fly leaves the estimate wrong.
     runaway_tripped: bool,
+    /// Runaway detection has disarmed this power-up's build at least once.
+    runaway_seen: bool,
     boot_gesture_since_us: Option<u64>,
 
     battery_volts: Option<f32>,
@@ -395,6 +400,7 @@ impl State {
             runaway_active: false,
             flight_proven: false,
             runaway_tripped: false,
+            runaway_seen: false,
             boot_gesture_since_us: None,
             battery_volts: None,
             battery_level: BatteryLevel::Ok,

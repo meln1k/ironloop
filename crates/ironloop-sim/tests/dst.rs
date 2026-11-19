@@ -66,13 +66,22 @@ fn generated_scenarios_hold_every_property_and_replay_identically() {
 /// shaft-rate tone once passed the 150 Hz gyro low-pass into the motors.
 /// Seed 73501 hovers through corrupted RC frames that pass the CRC, which
 /// `motors_quiet` once scored as motor noise.
+/// Seeds 49056 and 78109 have the IMU's z axis flipped (78109 the chip
+/// upside down) and roll onto their backs, where the chip reads about
+/// level; once armed they lay pressed into the ground with nothing
+/// spinning, which no runaway or crash check saw. 78109 is re-armed at
+/// idle after its runaway disarms and stayed so. Seed 36096, on an old pack,
+/// sits level on the ground at low throttle with a stick held, which a
+/// wedged-frame check that kept counting once airmode had engaged took
+/// for a runaway. Seed 2882 bounces on the ground on a sagging pack, and
+/// the yaw-growth check once took the bounce's own spin-up for a runaway.
 /// Seed 45798's mistakes cancel in
 /// the rate loops (IMU a quarter turn off, an axis flipped, two motors
 /// swapped), so it flies until the pilot's corrections tip it; the monitor
 /// once demanded that runaway detection stop it.
 #[test]
 fn regression_seeds_hold_every_property() {
-    for seed in [1531, 822, 3007, 6875, 3934, 838, 88, 445, 519, 70, 688, 257, 209, 741, 1360, 1979, 290248, 445159, 34731, 315882, 4285, 6018, 42067, 7861, 73501, 45798] {
+    for seed in [1531, 822, 3007, 6875, 3934, 838, 88, 445, 519, 70, 688, 257, 209, 741, 1360, 1979, 290248, 445159, 34731, 315882, 4285, 6018, 42067, 7861, 73501, 45798, 49056, 78109, 36096, 2882] {
         let r = run_seed(seed);
         assert!(r.violations.is_empty(), "seed {seed} [{}]: {:?}", r.name, r.violations);
     }

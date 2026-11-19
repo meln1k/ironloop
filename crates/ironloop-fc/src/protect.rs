@@ -29,6 +29,15 @@ const YAW_RUNAWAY_US: u64 = 250_000;
 /// pushes hard against it is a runaway.
 const YAW_GROWTH_US: u64 = 50_000;
 
+/// Yaw acceleration (rad/s², filtered) beyond what the motors can produce
+/// (about 250 at full differential thrust; a build spinning itself up
+/// reaches 150): the frame hit something.
+const YAW_HIT_ACCEL: f32 = 400.0;
+
+/// How long (µs) the frame may sit without turning the way the controller
+/// asks, never lifted off, before it counts as a runaway.
+const STUCK_RUNAWAY_US: u64 = 1_000_000;
+
 /// Climb (m/s, from `vz_est`) that shows an upright quad left the ground.
 const LIFTOFF_CLIMB: f32 = 0.5;
 
@@ -39,6 +48,11 @@ const TIPPED_OVER: f32 = 60f32.to_radians();
 pub(crate) fn runaway_and_crash(s: &mut State, gyro: Vec3, accel: Vec3, throttle: f32, dt: f32, fx: &mut Out) {
     let cfg = s.cfg;
     let now = s.now_us;
+    // Heavily filtered body rate, and the roll and pitch the controller
+    // asks for (rad/s).
+    let slow = s.gyro_slow.y;
+    let demand = Vec3::new(s.flight.setpoint.x, s.flight.setpoint.y, 0.0);
+    let wants = demand.norm();
     if s.runaway_active {
         let lim = cfg.pid_sum_limit * cfg.runaway_pid_frac;
         let pid_high = s.flight.last_pid.x.abs() >= lim || s.flight.last_pid.y.abs() >= lim;
@@ -72,7 +86,11 @@ pub(crate) fn runaway_and_crash(s: &mut State, gyro: Vec3, accel: Vec3, throttle
         // takes to spin up, which at full throttle is enough to climb a
         // meter.
         let yaw_pushed = p.z.abs() >= yaw_lim * 0.5 && gyro.z * p.z < 0.0 && gyro.z.abs() > cfg.runaway_gyro;
-        let yaw_grown = match (yaw_pushed, s.flight.yaw_pushed_since) {
+        // A bounce on the ground spins the frame up faster than any motor
+        // can, and a window started during it would see the rest of the
+        // hit as growth: a hit starts the window over once it has passed.
+        let hit = s.ang_accel.z.abs() > YAW_HIT_ACCEL;
+        let yaw_grown = match (yaw_pushed && !hit, s.flight.yaw_pushed_since) {
             (false, _) => {
                 s.flight.yaw_pushed_since = None;
                 false
@@ -98,13 +116,29 @@ pub(crate) fn runaway_and_crash(s: &mut State, gyro: Vec3, accel: Vec3, throttle
             s.flight.clipped_since_us = None;
         }
         let clipped_for = s.flight.clipped_since_us.filter(|_| clipped).map_or(0, |t| now - t);
+        // Wedged on the ground: never lifted off, the controller asks for
+        // a fast roll or pitch and the frame does not turn. A build that
+        // pushes the wrong way can hold itself pressed into the ground
+        // indefinitely: an IMU mounted upside down on a quad lying on its
+        // back reads about level, the tilt checks see nothing wrong, and
+        // nothing spins. With the throttle up, a build that flies would
+        // turn or lift a side within a fraction of a second. At low
+        // throttle it would not (a quad armed on a slope, or one that came
+        // down on a sagging pack while the pilot holds a stick), so that
+        // counts only for a build runaway detection has already stopped
+        // since power-up.
+        let trying = throttle > cfg.airmode_throttle || s.runaway_seen;
+        let stuck = !s.flight.lifted_off && trying && wants > 2.0 && slow.dot(demand) < wants;
+        let stuck_for = held_for(&mut s.flight.stuck_since_us, stuck, now);
         if (runaway && runaway_for >= cfg.runaway_us)
             || (yaw_opposed && yaw_opposed_for >= YAW_RUNAWAY_US)
             || yaw_grown
             || (clipped && clipped_for >= CLIPPED_RUNAWAY_US)
+            || stuck_for >= STUCK_RUNAWAY_US
         {
             disarm(s, DisarmReason::RunawayTakeoff, fx);
             s.runaway_tripped = true;
+            s.runaway_seen = true;
             return;
         }
         if !runaway {
@@ -150,7 +184,6 @@ pub(crate) fn runaway_and_crash(s: &mut State, gyro: Vec3, accel: Vec3, throttle
     // but it never hit anything: getting from flight to resting on the
     // ground takes a jolt that thrust cannot produce.
     let tilt = s.attitude.tilt();
-    let slow = s.gyro_slow.y;
     let up = s.attitude.up_in_body();
     let rp_motion = (slow - up * slow.dot(up)).norm();
     let a = accel.norm();
@@ -176,8 +209,6 @@ pub(crate) fn runaway_and_crash(s: &mut State, gyro: Vec3, accel: Vec3, throttle
     // Blocked means not turning the way the sticks ask, whatever else it
     // does: a corkscrew dive rolls about the vertical, like a quad spinning
     // flat, but it follows the stick.
-    let demand = Vec3::new(s.flight.setpoint.x, s.flight.setpoint.y, 0.0);
-    let wants = demand.norm();
     let blocked = tilt > TIPPED_OVER && wants > 2.0 && slow.dot(demand) < wants;
     // Each condition times itself: a pilot rolling out of a slow inverted
     // dive turns `lying` into `blocked` for a moment, and must get the full
