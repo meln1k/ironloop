@@ -38,7 +38,9 @@ Arming blocker bits in `blk`: 0x01 calibrating, 0x02 throttle, 0x04 RC link, 0x0
 
 ## 5. Motors and DShot (quad strapped down, props off)
 
-- [ ] Arming spins all four motors at idle, and `mot` shows about 158 on each.
+- [ ] Arming spins all four motors at idle, and `mot` shows about 248 (10 %) on each.
+- [ ] With props on and the quad strapped down, arm and leave it at idle for 30 s: no prop spins and stops, and `erpm` stays steady on every motor. A motor that stops is an ESC losing sync at idle (Bluejay then restarts it after 100 ms); raise `motor_idle`. Repeat on a pack near 3.5 V.
+- [ ] Time from arming to steady `erpm` on all four motors is under about 0.3 s.
 - [ ] Motor order: M1 rear-right, M2 front-right, M3 rear-left, M4 front-left. With the quad held and armed, tilting it right speeds up the right motors (M1, M2) as it fights back, and tilting it nose down speeds up the front motors (M2, M4).
 - [ ] Spin directions match the props-out layout (`yaw_motors_reversed = ON` in the factory dump).
 - [ ] `erpm` rises with throttle on every motor, toward about 72,000 RPM × 6 pole pairs at full throttle on a full pack.

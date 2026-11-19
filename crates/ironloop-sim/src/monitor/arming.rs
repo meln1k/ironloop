@@ -67,8 +67,10 @@ pub fn step(cx: &Cx, link: &Link, frame: &Frame, imu: &Imu, v: &mut Verdicts) {
             Some(DisarmReason::Failsafe) => before.failsafe != FailsafeStage::None,
             Some(DisarmReason::ImuFailure) => imu_age >= REQ_IMU_TOLERATE_US,
             // Stopping a quad that cannot fly (dead motor) is no false alarm.
-            Some(DisarmReason::Crash) => (cx.alt < 0.3 && cx.true_tilt > REQ_TIPPED_OVER) || cx.sc.unflyable(),
-            Some(DisarmReason::RunawayTakeoff) => cx.sc.unflyable(),
+            // Stopping a quad tipped over on the ground is no false alarm,
+            // whichever check sees it first: a runaway check can see the
+            // bounce of a crash before the crash check does.
+            Some(DisarmReason::Crash | DisarmReason::RunawayTakeoff) => (cx.alt < 0.3 && cx.true_tilt > REQ_TIPPED_OVER) || cx.sc.unflyable(),
             None => false,
         };
         if !justified {

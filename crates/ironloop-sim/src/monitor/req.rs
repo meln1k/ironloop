@@ -51,7 +51,7 @@ pub const REQ_MOTOR_FAULT_US: u64 = 200_000;
 /// While armed every motor runs at least this DShot value (3% idle).
 pub const REQ_ARMED_MIN_DSHOT: u16 = DSHOT_MIN + 60;
 /// Motor idle (fraction of full command) the throttle curve starts from.
-pub const REQ_IDLE: f32 = 0.055;
+pub const REQ_IDLE: f32 = 0.10;
 /// Arming never happens without good IMU data for this long.
 pub const REQ_ARM_IMU_FRESH_US: u64 = 30_000;
 /// The attitude quaternion stays this close to unit length.

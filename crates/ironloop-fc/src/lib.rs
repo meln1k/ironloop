@@ -227,7 +227,13 @@ struct Flight {
     /// Since when the PIDs have pushed at their limit against a clipped
     /// gyro, and the yaw output against the yaw rate (`runaway_and_crash`).
     clipped_since_us: Option<u64>,
+    /// The last step on which the gyro was clipped with the PIDs pushing
+    /// against it.
+    clipped_last_us: u64,
     yaw_opposed_since_us: Option<u64>,
+    /// When the yaw output started pushing hard against the yaw rate, and
+    /// how fast it was then (rad/s).
+    yaw_pushed_since: Option<(u64, f32)>,
     runaway_ok_us: u64,
     /// Since arming, the climb estimate has shown the quad rising while
     /// upright: it left the ground under its own thrust.

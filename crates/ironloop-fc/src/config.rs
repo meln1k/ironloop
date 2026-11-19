@@ -167,7 +167,9 @@ impl Default for Config {
             angle_limit: 55.0f32.to_radians(),
             angle_p: 8.0,
             angle_rate_limit: 600.0f32.to_radians(),
-            motor_idle: 0.055,
+            // Bluejay hands the motor to the FC once it runs, and too low an
+            // idle then stalls it. The factory Betaflight setup uses 10%.
+            motor_idle: 0.10,
             airmode_throttle: 0.25,
             vbat_ref: 3.9,
             vbat_warn: 3.45,

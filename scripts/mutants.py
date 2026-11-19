@@ -132,6 +132,8 @@ MUTANTS = {
     # Filtering: noise the filters let through jitters the motors.
     "RPM filter off": [(CFG, "rpm_filter_harmonics: 3,", "rpm_filter_harmonics: 0,")],
     "D-term low-pass at 250 Hz": [(CFG, "dterm_lpf_hz: 90.0,", "dterm_lpf_hz: 250.0,")],
+    # ESC: an idle the motors cannot run at.
+    "motor idle 5.5% (stalls on a sagging pack)": [(CFG, "motor_idle: 0.10,", "motor_idle: 0.055,")],
     # The checker itself: a monitor bug that hides real firmware failures.
     "monitor: any fault during a link loss excuses the failsafe checks": [(
         MON,

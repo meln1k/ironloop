@@ -98,6 +98,7 @@ pub static PROPERTIES: &[&Property] = &[
     &flight::SAG_COMPENSATED,
     &script::ANGLE_TRACKS,
     &flight::MOTORS_QUIET,
+    &protect::NO_ESC_STALL,
 ];
 
 #[derive(Clone, Debug, PartialEq)]

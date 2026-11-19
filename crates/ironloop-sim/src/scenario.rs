@@ -511,6 +511,15 @@ impl Scenario {
         f.k_t *= r.range(0.9, 1.08);
         f.tau_up *= r.range(0.8, 1.3);
         f.tau_down *= r.range(0.8, 1.3);
+        // The ESC: how long it takes to start a motor, the slowest speed it
+        // keeps sync at, and how hard it limits acceleration at low speed.
+        // Nobody has measured these on this quad; the slowest speed is set
+        // so that the factory idle (6-10%) runs on a charged pack. Drawn
+        // from their own stream so the rest of each scenario is unchanged.
+        let e = &mut Rng::fork(self.seed, "esc");
+        f.esc_start_us = e.range_u64(50_000, 250_000);
+        f.esc_min_speed = e.range(0.03, 0.06);
+        f.esc_rampup = e.range(2.0, 4.0);
         for k in [&mut f.drag_lin, &mut f.drag_quad] {
             *k = *k * r.range(0.7, 1.4);
         }

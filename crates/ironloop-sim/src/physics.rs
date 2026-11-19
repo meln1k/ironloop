@@ -40,6 +40,18 @@ pub struct Airframe {
     /// Rotational damping (N·m per rad/s).
     pub rot_damping: f32,
     pub pole_pairs: f32,
+    /// How long the ESC takes to start a motor from standstill (µs): open
+    /// loop at its startup power until it has synchronised.
+    pub esc_start_us: u64,
+    /// The speed (fraction of full) the ESC drives while starting.
+    pub esc_start_power: f32,
+    /// Below this speed (fraction of full) for `ESC_STALL_US` the back-EMF
+    /// is too weak to follow and the ESC loses sync.
+    pub esc_min_speed: f32,
+    /// Bluejay's RPM power protection ("rampup"): the command is capped at
+    /// `esc_start_power + esc_rampup * speed`, so the motor accelerates more
+    /// slowly from low speed.
+    pub esc_rampup: f32,
 }
 
 impl Default for Airframe {
@@ -67,6 +79,10 @@ impl Default for Airframe {
             rotor_drag: 3.0e-7,
             rot_damping: 2.0e-6,
             pole_pairs: 6.0,
+            esc_start_us: 120_000,
+            esc_start_power: 0.1,
+            esc_min_speed: 0.045,
+            esc_rampup: 3.0,
         }
     }
 }
@@ -82,6 +98,24 @@ pub enum MotorHealth {
     Dead,
 }
 
+/// What the ESC is doing with its motor, as in Bluejay.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Esc {
+    /// Zero command: the motor coasts to a stop.
+    Stopped,
+    /// Starting open loop since `since_us`; `tries` stalls so far.
+    Starting { since_us: u64, tries: u8 },
+    /// Synchronised and following the command. `slow_since_us` is when the
+    /// speed fell below the ESC's minimum.
+    Running { since_us: u64, slow_since_us: Option<u64>, tries: u8 },
+    /// Lost sync at `since_us`: no drive for `ESC_RESTART_WAIT_US`, then it
+    /// starts again.
+    Stalled { since_us: u64, tries: u8 },
+    /// Stalled `ESC_MAX_STALLS` times in a row; it waits for a zero command
+    /// before it tries again.
+    GaveUp,
+}
+
 #[derive(Clone, Debug)]
 pub struct Motor {
     /// Last DShot value received by the ESC.
@@ -92,6 +126,9 @@ pub struct Motor {
     /// Shaft angle (rad), drives prop-imbalance vibration.
     pub phase: f32,
     pub health: MotorHealth,
+    pub esc: Esc,
+    /// How often the ESC has lost sync on its own (not by a fault).
+    pub stalls: u32,
 }
 
 #[derive(Clone, Debug)]
@@ -192,6 +229,14 @@ pub struct World {
 
 /// ESCs stop the motors when DShot frames stop arriving.
 pub const ESC_SIGNAL_TIMEOUT_US: u64 = 250_000;
+/// Too slow for this long loses sync.
+pub const ESC_STALL_US: u64 = 30_000;
+/// Bluejay waits this long after a stall before it starts again...
+pub const ESC_RESTART_WAIT_US: u64 = 100_000;
+/// ...and gives up after this many stalls in a row.
+pub const ESC_MAX_STALLS: u8 = 3;
+/// Running this long without a stall clears the count.
+pub const ESC_STALLS_FORGOTTEN_US: u64 = 1_000_000;
 
 /// Contact points (body frame): duct bottoms, duct tops, canopy.
 fn contact_points(f: &Airframe) -> [Vec3; 9] {
@@ -226,6 +271,8 @@ impl World {
                 omega: 0.0,
                 phase: 0.0,
                 health: MotorHealth::Ok,
+                esc: Esc::Stopped,
+                stalls: 0,
             }),
             battery,
             wind,
@@ -237,8 +284,12 @@ impl World {
         self.frame.k_t * self.motors[i].omega * self.motors[i].omega
     }
 
-    /// eRPM as a bidirectional-DShot ESC reports it.
+    /// eRPM as a bidirectional-DShot ESC reports it: none until it has
+    /// synchronised.
     pub fn erpm(&self, i: usize) -> u32 {
+        if !matches!(self.motors[i].esc, Esc::Running { .. }) {
+            return 0;
+        }
         let rpm = self.motors[i].omega * 60.0 / (2.0 * core::f32::consts::PI);
         (rpm * self.frame.pole_pairs) as u32
     }
@@ -263,7 +314,8 @@ impl World {
                 MotorHealth::Degraded(k) => k,
                 MotorHealth::Desync | MotorHealth::Dead => 0.0,
             };
-            let target = cmd * f.omega_max * (b.volts / f.v_ref).max(0.0) * health;
+            let drive = esc(m, f, cmd, now_us, health > 0.0);
+            let target = drive * f.omega_max * (b.volts / f.v_ref).max(0.0) * health;
             let tau = if target > m.omega { f.tau_up } else { f.tau_down };
             m.omega += (target - m.omega) * (1.0 - expf(-dt / tau));
             m.phase = (m.phase + m.omega * dt) % (2.0 * core::f32::consts::PI);
@@ -362,3 +414,37 @@ impl World {
 
 const CONTACT_K: f32 = 400.0;
 const CONTACT_C: f32 = 1.2;
+
+/// Steps the ESC's state and returns the command it drives the motor at.
+/// `sound` is false while a fault stops the motor, which is judged
+/// separately.
+fn esc(m: &mut Motor, f: &Airframe, cmd: f32, now: u64, sound: bool) -> f32 {
+    if cmd <= 0.0 {
+        m.esc = Esc::Stopped;
+        return 0.0;
+    }
+    let speed = m.omega / f.omega_max;
+    m.esc = match m.esc {
+        Esc::Stopped => Esc::Starting { since_us: now, tries: 0 },
+        Esc::Starting { since_us, tries } if now - since_us >= f.esc_start_us => Esc::Running { since_us: now, slow_since_us: None, tries },
+        Esc::Running { since_us, slow_since_us, tries } => {
+            let tries = if now - since_us >= ESC_STALLS_FORGOTTEN_US { 0 } else { tries };
+            let slow = (sound && speed < f.esc_min_speed).then(|| slow_since_us.unwrap_or(now));
+            if slow.is_some_and(|s| now - s >= ESC_STALL_US) {
+                m.stalls += 1;
+                Esc::Stalled { since_us: now, tries: tries + 1 }
+            } else {
+                Esc::Running { since_us, slow_since_us: slow, tries }
+            }
+        }
+        Esc::Stalled { since_us, tries } if now - since_us >= ESC_RESTART_WAIT_US => {
+            if tries >= ESC_MAX_STALLS { Esc::GaveUp } else { Esc::Starting { since_us: now, tries } }
+        }
+        state => state,
+    };
+    match m.esc {
+        Esc::Starting { .. } => f.esc_start_power,
+        Esc::Running { .. } => cmd.min(f.esc_start_power + f.esc_rampup * speed),
+        _ => 0.0,
+    }
+}

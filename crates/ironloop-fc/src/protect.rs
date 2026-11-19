@@ -16,9 +16,18 @@ const TIPPED_FALL_MAX: f32 = 2.0;
 /// against the clipped rate, counts as a runaway.
 const CLIPPED_RUNAWAY_US: u64 = 500_000;
 
+/// A clip that lets go for less than this (µs) has not ended: tumbling at
+/// the gyro's range, vibration and each bounce take the reading just under
+/// it and back.
+const CLIPPED_GAP_US: u64 = 100_000;
+
 /// How long (µs) the yaw output at its limit against the yaw rate counts as
 /// a runaway.
 const YAW_RUNAWAY_US: u64 = 250_000;
+
+/// A yaw rate that doubles within this long (µs) while the yaw output
+/// pushes hard against it is a runaway.
+const YAW_GROWTH_US: u64 = 50_000;
 
 /// Climb (m/s, from `vz_est`) that shows an upright quad left the ground.
 const LIFTOFF_CLIMB: f32 = 0.5;
@@ -55,6 +64,26 @@ pub(crate) fn runaway_and_crash(s: &mut State, gyro: Vec3, accel: Vec3, throttle
         let yaw_high = p.z.abs() >= yaw_lim;
         let yaw_opposed = yaw_high && gyro.z * p.z < 0.0 && gyro.z.abs() > cfg.runaway_gyro;
         let yaw_opposed_for = held_for(&mut s.flight.yaw_opposed_since_us, yaw_opposed, now);
+        // The same build shows sooner as a yaw rate that grows while the
+        // output pushes hard against it: one that flies slows down whatever
+        // it pushes against, so its rate never doubles. Comparing across a
+        // window, not the acceleration of the moment, keeps vibration and
+        // bounces out of it. It catches the build in the half second it
+        // takes to spin up, which at full throttle is enough to climb a
+        // meter.
+        let yaw_pushed = p.z.abs() >= yaw_lim * 0.5 && gyro.z * p.z < 0.0 && gyro.z.abs() > cfg.runaway_gyro;
+        let yaw_grown = match (yaw_pushed, s.flight.yaw_pushed_since) {
+            (false, _) => {
+                s.flight.yaw_pushed_since = None;
+                false
+            }
+            (true, Some((since, rate))) if now - since <= YAW_GROWTH_US => gyro.z.abs() >= 2.0 * rate,
+            // A new window from here: the rate must double within each.
+            (true, _) => {
+                s.flight.yaw_pushed_since = Some((now, gyro.z.abs()));
+                false
+            }
+        };
         // A gyro clipped at its range reads a flat rate, so whether the
         // frame follows the push cannot be seen (an IMU axis with the wrong
         // sign spins it up past the range at once). Full stick asks for a
@@ -62,9 +91,16 @@ pub(crate) fn runaway_and_crash(s: &mut State, gyro: Vec3, accel: Vec3, throttle
         // clip quickly; a clip the PIDs push against for longer than a
         // tumble on the ground holds it is a runaway.
         let clipped = (pid_high || yaw_high) && s.gyro_saturated && gyro.dot(p) < 0.0;
-        let clipped_for = held_for(&mut s.flight.clipped_since_us, clipped, now);
+        if clipped {
+            s.flight.clipped_since_us.get_or_insert(now);
+            s.flight.clipped_last_us = now;
+        } else if now.saturating_sub(s.flight.clipped_last_us) > CLIPPED_GAP_US {
+            s.flight.clipped_since_us = None;
+        }
+        let clipped_for = s.flight.clipped_since_us.filter(|_| clipped).map_or(0, |t| now - t);
         if (runaway && runaway_for >= cfg.runaway_us)
             || (yaw_opposed && yaw_opposed_for >= YAW_RUNAWAY_US)
+            || yaw_grown
             || (clipped && clipped_for >= CLIPPED_RUNAWAY_US)
         {
             disarm(s, DisarmReason::RunawayTakeoff, fx);

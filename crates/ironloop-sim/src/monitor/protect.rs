@@ -7,7 +7,7 @@ use ironloop_fc::{BatteryLevel, DSHOT_MIN, Effect, EventKind, Notice};
 
 use super::req::*;
 use super::{Cx, Imu, Link, Property, Verdicts};
-use crate::physics::MotorHealth;
+use crate::physics::{Esc, MotorHealth};
 use crate::scenario::FaultKind;
 
 pub static IMU_LOSS_STOPS: Property = Property {
@@ -21,6 +21,10 @@ pub static CRASH_STOPS: Property = Property {
 pub static RUNAWAY_STOPS: Property = Property {
     name: "runaway_stops",
     doc: "A quad with its motors swapped or an IMU axis flipped never climbs above 1 m and stops within 5 s of throttle-up.",
+};
+pub static NO_ESC_STALL: Property = Property {
+    name: "no_esc_stall",
+    doc: "While armed, no ESC loses sync on a sound motor: idle keeps every motor fast enough (a stall stops it for at least 100 ms).",
 };
 pub static NO_FLYAWAY: Property = Property {
     name: "no_flyaway",
@@ -56,6 +60,8 @@ pub struct Protect {
     motor_bad_us: [Option<u64>; 4],
     stall_since: [Option<u64>; 4],
     fault_reported: [bool; 4],
+    /// ESC stalls seen so far, all motors.
+    esc_stalls: u32,
 }
 
 impl Protect {
@@ -117,6 +123,16 @@ impl Protect {
             self.crit_since = None;
         }
 
+        let stalls = world.motors.iter().map(|m| m.stalls).sum::<u32>();
+        if before.armed {
+            v.live(&NO_ESC_STALL);
+            if stalls > self.esc_stalls {
+                let i = world.motors.iter().position(|m| matches!(m.esc, Esc::Stalled { .. })).unwrap_or(0);
+                v.fail(t, &NO_ESC_STALL, format!("motor {i} lost sync at {:.2} V", world.battery.volts));
+            }
+        }
+        self.esc_stalls = stalls;
+
         // Stalled motor detection (needs bidirectional DShot telemetry).
         let telemetry_ok = sc.esc_telemetry && !sc.faults.iter().any(|f| f.active(t) && f.kind == FaultKind::TelemetryLoss);
         for i in 0..4 {
@@ -145,7 +161,10 @@ impl Protect {
             self.below_warn_v_us = Some(t);
         }
         for i in 0..4 {
-            if world.motors[cx.sc.wired(i)].health != MotorHealth::Ok {
+            // A fault, or the ESC starting or restarting the motor: either
+            // way it is not spinning as commanded.
+            let m = &world.motors[cx.sc.wired(i)];
+            if m.health != MotorHealth::Ok || !matches!(m.esc, Esc::Running { .. }) {
                 self.motor_bad_us[i] = Some(t);
             }
         }
