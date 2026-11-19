@@ -78,9 +78,8 @@ pub struct Sim {
     imu_sampled_us: Option<u64>,
     /// The IMU chip's low-pass state: two stages each for gyro and accel.
     chip_lpf: Option<([Vec3; 2], [Vec3; 2])>,
-    /// The frame resonance's oscillator for gyro and accel: position and
-    /// velocity, at unit RMS.
-    frame: [[Vec3; 2]; 2],
+    /// The frame resonance's oscillators for gyro and accel.
+    frame: [Resonance; 2],
     /// Its own stream, so the frame's noise does not shift the sensor's.
     rng_vib: Rng,
     /// A clock jump back the firmware's next step will see.
@@ -141,7 +140,7 @@ impl Sim {
             last_imu_raw: None,
             imu_sampled_us: None,
             chip_lpf: None,
-            frame: [[Vec3::ZERO; 2]; 2],
+            frame: [Resonance::default(); 2],
             rng_vib: Rng::fork(seed, "vib"),
             clock_back_us: 0,
             manual: None,
@@ -448,26 +447,15 @@ impl Sim {
             gyro += Vec3::new(sinf(p3), cosf(p3), 0.5 * sinf(p3 + 1.1)) * (imu.blade_gyro * k3);
             accel += Vec3::new(0.3 * cosf(p3), 0.3 * sinf(p3), sinf(p3 + 0.4)) * (imu.blade_accel * k3);
         }
-        // A frame resonance rung by the airflow: a damped oscillator kicked
-        // by white noise, stepped exactly over each sample interval (so it
-        // stays stable whatever the timing), with unit RMS, scaled to its
-        // size at this thrust.
+        // A frame resonance rung by the airflow, scaled to its size at this
+        // thrust.
         if (imu.frame_gyro > 0.0 || imu.frame_accel > 0.0) && dt > 0.0 {
-            let w = TAU * imu.frame_hz;
-            let sigma = w / (2.0 * imu.frame_q);
-            let wd = libm::sqrtf(w * w - sigma * sigma);
-            let decay = libm::expf(-sigma * dt);
-            let (s, c) = (sinf(wd * dt), cosf(wd * dt));
-            // Half its energy is in the velocity, so this leaves x at unit RMS.
-            let kick = w * libm::sqrtf(2.0 * (1.0 - decay * decay));
             let r = &mut self.rng_vib;
-            for [x, v] in self.frame.iter_mut() {
-                (*x, *v) = ((*x * c + (*v + *x * sigma) * (s / wd)) * decay, (*v * c - (*v * sigma + *x * (w * w)) * (s / wd)) * decay);
-                *v += Vec3::new(r.normal(), r.normal(), r.normal()) * kick;
-            }
+            let g = self.frame[0].step(imu.frame_hz, imu.frame_q, dt, r);
+            let a = self.frame[1].step(imu.frame_hz, imu.frame_q, dt, r);
             let size = thrust * chip(imu.frame_hz).0;
-            gyro += self.frame[0][0] * (imu.frame_gyro * size);
-            accel += self.frame[1][0] * (imu.frame_accel * size);
+            gyro += g * (imu.frame_gyro * size);
+            accel += a * (imu.frame_accel * size);
         }
 
         let to_sensor = |v: Vec3| match imu.mount {
@@ -649,4 +637,104 @@ fn hash_debug<T: core::fmt::Debug>(h: &mut u64, v: &T) {
         }
     }
     let _ = write!(Fnv(h), "{v:?}");
+}
+
+/// A resonance rung by noise: a damped oscillator at `hz` with quality
+/// factor `q`, kicked by white noise. Each kick only stands in for the noise
+/// over its interval when that is short against the period, so an interval
+/// is split into steps of at most a sixteenth of one, each solved exactly:
+/// it stays stable and rings the same whatever the sample timing. Its output
+/// has unit RMS on each axis.
+#[derive(Clone, Copy, Debug, Default)]
+struct Resonance {
+    x: Vec3,
+    v: Vec3,
+}
+
+impl Resonance {
+    fn step(&mut self, hz: f32, q: f32, dt: f32, r: &mut Rng) -> Vec3 {
+        let n = libm::ceilf(dt * hz * 16.0).max(1.0);
+        for _ in 0..n as u32 {
+            self.substep(hz, q, dt / n, r);
+        }
+        self.x
+    }
+
+    fn substep(&mut self, hz: f32, q: f32, dt: f32, r: &mut Rng) {
+        let w = TAU * hz;
+        let sigma = w / (2.0 * q);
+        let wd = libm::sqrtf(w * w - sigma * sigma);
+        let decay = libm::expf(-sigma * dt);
+        let (s, c) = (sinf(wd * dt), cosf(wd * dt));
+        // Half its energy is in the velocity, so this leaves x at unit RMS.
+        let kick = w * libm::sqrtf(2.0 * (1.0 - decay * decay));
+        let (x, v) = (self.x, self.v);
+        self.x = (x * c + (v + x * sigma) * (s / wd)) * decay;
+        self.v = (v * c - (v * sigma + x * (w * w)) * (s / wd)) * decay;
+        self.v += Vec3::new(r.normal(), r.normal(), r.normal()) * kick;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Steps a resonance at random intervals of `min_us..max_us` for
+    /// `secs`, and returns the RMS of its x output and its power at each of
+    /// `freqs` (averaged over 0.5 s stretches, as a DFT over the uneven
+    /// sample times).
+    fn ring(hz: f32, q: f32, min_us: u64, max_us: u64, secs: f64, freqs: &[f64]) -> (f64, Vec<f64>) {
+        let (mut res, mut noise, mut timing) = (Resonance::default(), Rng::new(1), Rng::new(2));
+        let (mut t, mut sq, mut n) = (0.0f64, 0.0f64, 0u64);
+        let mut power = vec![0.0; freqs.len()];
+        let mut bins = vec![(0.0f64, 0.0f64); freqs.len()];
+        let mut stretch_end = 0.5;
+        while t < secs {
+            let dt = timing.range_u64(min_us, max_us + 1) as f64 * 1e-6;
+            t += dt;
+            let x = res.step(hz, q, dt as f32, &mut noise).x as f64;
+            assert!(x.is_finite(), "diverged at {t:.3} s");
+            if t < 1.0 {
+                continue; // settling
+            }
+            sq += x * x;
+            n += 1;
+            for (b, f) in bins.iter_mut().zip(freqs) {
+                let ph = core::f64::consts::TAU * f * t;
+                b.0 += x * ph.cos() * dt;
+                b.1 -= x * ph.sin() * dt;
+            }
+            if t >= stretch_end {
+                for (p, b) in power.iter_mut().zip(bins.iter_mut()) {
+                    *p += b.0 * b.0 + b.1 * b.1;
+                    *b = (0.0, 0.0);
+                }
+                stretch_end += 0.5;
+            }
+        }
+        ((sq / n as f64).sqrt(), power)
+    }
+
+    /// The frame resonance once grew without bound when the sample interval
+    /// jittered, which the DST read as the gyro clipping on a quad sitting
+    /// still. It must ring at its frequency, as sharply as its Q says, at
+    /// unit RMS, at the IMU's rate with jitter and at intervals from 50 µs
+    /// to far longer than its period.
+    #[test]
+    fn frame_resonance_rings_at_its_frequency_and_size() {
+        for (hz, q) in [(150.0f32, 5.0f32), (300.0, 10.0), (600.0, 20.0)] {
+            let f0 = hz as f64;
+            // Half-power points are about f0 * (1 +- 1 / 2Q).
+            let half = 1.0 / (2.0 * q as f64);
+            let freqs = [0.5 * f0, f0 * (1.0 - half), f0, f0 * (1.0 + half), 1.5 * f0];
+            let (rms, p) = ring(hz, q, 250, 400, 200.0, &freqs);
+            assert!((0.93..1.07).contains(&rms), "{hz} Hz: RMS {rms}");
+            let rel: Vec<f64> = p.iter().map(|x| x / p[2]).collect();
+            assert!(rel[0] < 0.1 && rel[4] < 0.1, "{hz} Hz: not narrow: {rel:?}");
+            assert!((0.3..0.75).contains(&rel[1]) && (0.3..0.75).contains(&rel[3]), "{hz} Hz: wrong width for Q {q}: {rel:?}");
+
+            let (rms, _) = ring(hz, q, 50, 5000, 200.0, &[]);
+            assert!((0.93..1.07).contains(&rms), "{hz} Hz: RMS {rms} with intervals of 50 us to 5 ms");
+        }
+    }
 }
