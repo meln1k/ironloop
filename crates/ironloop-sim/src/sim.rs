@@ -678,7 +678,7 @@ impl Sim {
         for e in &fx {
             match *e {
                 Effect::Motors(m) => {
-                    hash_debug(&mut self.motor_hash, &m);
+                    m.into_iter().for_each(|v| Fnv(&mut self.motor_hash).u16(v));
                     self.pending_motors.push_back(m);
                     self.schedule(self.t_us + cost_us + MOTOR_LATENCY_US, Ev::ApplyMotors);
                 }
@@ -738,7 +738,7 @@ struct Task {
     tick_due: bool,
 }
 
-/// FNV-1a over text written to it.
+/// FNV-1a over the bytes written to it.
 struct Fnv<'a>(&'a mut u64);
 
 impl Fnv<'_> {
@@ -748,31 +748,18 @@ impl Fnv<'_> {
         }
     }
 
-    /// `{n}`.
-    fn int(&mut self, mut n: u64) {
-        let mut digits = [0u8; 20];
-        let mut at = digits.len();
-        loop {
-            at -= 1;
-            digits[at] = b'0' + (n % 10) as u8;
-            n /= 10;
-            if n == 0 {
-                break;
-            }
-        }
-        self.bytes(&digits[at..]);
+    fn u16(&mut self, v: u16) {
+        self.bytes(&v.to_le_bytes());
     }
 
-    /// `{items:?}`, with `item` writing each one.
-    fn list<T>(&mut self, items: &[T], mut item: impl FnMut(&mut Self, &T)) {
-        self.bytes(b"[");
-        for (i, x) in items.iter().enumerate() {
-            if i > 0 {
-                self.bytes(b", ");
-            }
-            item(self, x);
+    fn u32(&mut self, v: u32) {
+        self.bytes(&v.to_le_bytes());
+    }
+
+    fn floats(&mut self, v: &[f32]) {
+        for x in v {
+            self.u32(x.to_bits());
         }
-        self.bytes(b"]");
     }
 }
 
@@ -783,106 +770,69 @@ impl core::fmt::Write for Fnv<'_> {
     }
 }
 
-fn hash_debug<T: core::fmt::Debug>(h: &mut u64, v: &T) {
-    use core::fmt::Write;
-    let _ = write!(Fnv(h), "{v:?}");
-}
-
-/// Hashes `{event:?}`, with the frequent events written out by hand to the
-/// same text: formatting was most of the cost of the hash.
+/// Hashes an event as its fields' bits, each kind behind its own tag byte;
+/// the rare commands as their Debug text.
 fn hash_event(h: &mut u64, event: &Event) {
     use core::fmt::Write;
-    let Event { t_us, kind } = *event;
     let mut w = Fnv(h);
-    w.bytes(b"Event { t_us: ");
-    w.int(t_us);
-    w.bytes(b", kind: ");
-    match kind {
+    w.bytes(&event.t_us.to_le_bytes());
+    match event.kind {
         EventKind::Imu { gyro, accel } => {
-            w.bytes(b"Imu { gyro: ");
-            hash_floats(&mut w, &gyro);
-            w.bytes(b", accel: ");
-            hash_floats(&mut w, &accel);
-            w.bytes(b" }");
+            w.bytes(&[0]);
+            w.floats(&gyro);
+            w.floats(&accel);
         }
-        EventKind::Tick => w.bytes(b"Tick"),
         EventKind::Rc { channels } => {
-            w.bytes(b"Rc { channels: ");
-            w.list(&channels, |w, &c| w.int(c.into()));
-            w.bytes(b" }");
+            w.bytes(&[1]);
+            channels.into_iter().for_each(|c| w.u16(c));
+        }
+        EventKind::Battery { volts, amps } => {
+            w.bytes(&[2]);
+            w.floats(&[volts, amps]);
         }
         EventKind::MotorTelemetry { erpm } => {
-            w.bytes(b"MotorTelemetry { erpm: ");
-            w.list(&erpm, |w, e| match *e {
-                Some(e) => {
-                    w.bytes(b"Some(");
-                    w.int(e.into());
-                    w.bytes(b")");
+            w.bytes(&[3]);
+            for e in erpm {
+                match e {
+                    Some(e) => {
+                        w.bytes(&[1]);
+                        w.u32(e);
+                    }
+                    None => w.bytes(&[0]),
                 }
-                None => w.bytes(b"None"),
-            });
-            w.bytes(b" }");
+            }
         }
-        _ => {
-            let _ = write!(w, "{kind:?}");
+        EventKind::Tick => w.bytes(&[4]),
+        EventKind::Command(c) => {
+            w.bytes(&[5]);
+            let _ = write!(w, "{c:?}");
         }
     }
-    w.bytes(b" }");
 }
 
-/// Hashes `{fx:?}`, with the effects nearly every step has written out by
-/// hand.
+/// Hashes a step's effects as their count and each one's tag byte and bits;
+/// the rare notices as their Debug text.
 fn hash_effects(h: &mut u64, fx: &[Effect]) {
     use core::fmt::Write;
-    Fnv(h).list(fx, |w, e| match *e {
-        Effect::Motors(m) => {
-            w.bytes(b"Motors(");
-            w.list(&m, |w, &v| w.int(v.into()));
-            w.bytes(b")");
-        }
-        Effect::Led(on) => w.bytes(if on { b"Led(true)" } else { b"Led(false)" }),
-        Effect::Beeper(on) => w.bytes(if on { b"Beeper(true)" } else { b"Beeper(false)" }),
-        _ => {
-            let _ = write!(w, "{e:?}");
-        }
-    });
-}
-
-/// Writes `{v:?}` for three floats, each from a per-thread cache of the
-/// text of recent values (IMU samples are quantized, so values repeat).
-fn hash_floats(w: &mut Fnv, v: &[f32; 3]) {
-    use core::fmt::Write;
-    #[derive(Clone, Copy)]
-    struct Entry {
-        bits: u32,
-        len: u8,
-        text: [u8; 27],
-    }
-    struct Buf<'a>(&'a mut Entry);
-    impl Write for Buf<'_> {
-        fn write_str(&mut self, s: &str) -> core::fmt::Result {
-            let at = self.0.len as usize;
-            let dst = self.0.text.get_mut(at..at + s.len()).ok_or(core::fmt::Error)?;
-            dst.copy_from_slice(s.as_bytes());
-            self.0.len += s.len() as u8;
-            Ok(())
-        }
-    }
-    const SLOTS: usize = 4096;
-    thread_local! {
-        static CACHE: std::cell::RefCell<Vec<Entry>> = std::cell::RefCell::new(vec![Entry { bits: 0, len: 0, text: [0; 27] }; SLOTS]);
-    }
-    CACHE.with_borrow_mut(|cache| {
-        w.list(v, |w, x| {
-            let bits = x.to_bits();
-            let e = &mut cache[(bits.wrapping_mul(0x9E37_79B9) >> 20) as usize % SLOTS];
-            if e.len == 0 || e.bits != bits {
-                *e = Entry { bits, len: 0, text: [0; 27] };
-                write!(Buf(e), "{x:?}").expect("an f32's text fits in 27 bytes");
+    let mut w = Fnv(h);
+    w.bytes(&[fx.len() as u8]);
+    for e in fx {
+        match *e {
+            Effect::Motors(m) => {
+                w.bytes(&[0]);
+                m.into_iter().for_each(|v| w.u16(v));
             }
-            w.bytes(&e.text[..e.len as usize]);
-        });
-    });
+            Effect::Led(on) => w.bytes(&[1, on as u8]),
+            Effect::Beeper(on) => w.bytes(&[2, on as u8]),
+            Effect::Notice(n) => {
+                w.bytes(&[3]);
+                let _ = write!(w, "{n:?}");
+                // Ends the text, so it cannot run into the next effect.
+                w.bytes(&[0]);
+            }
+            Effect::RebootToBootloader => w.bytes(&[4]),
+        }
+    }
 }
 
 /// A resonance rung by noise: a damped oscillator at `hz` with quality
@@ -989,45 +939,62 @@ mod tests {
         ((sq / n as f64).sqrt(), power)
     }
 
-    /// The trace hash writes IMU events and the common effects out by hand;
-    /// it must hash exactly their Debug text, or every trace hash changes.
+    /// Replay and the paired runs compare trace hashes: a field the hash
+    /// leaves out would let two different runs pass as the same.
     #[test]
-    fn trace_hash_matches_debug_text() {
-        use ironloop_fc::{Command, Effects, FlightMode};
-        let odd = [0.0, -0.0, f32::NAN, f32::INFINITY, f32::NEG_INFINITY, 1e-5, 1e-4, -1.5e-40, 1e16, 9.9e15, 123456.78, f32::MAX, f32::MIN_POSITIVE, 0.1];
-        let mut r = Rng::new(3);
-        let f = |r: &mut Rng| if r.chance(0.5) { *r.pick(&odd) } else { f32::from_bits(r.next_u64() as u32) };
-        for i in 0..50_000u64 {
-            let kind = match i % 8 {
-                0 => EventKind::Battery { volts: f(&mut r), amps: f(&mut r) },
-                1 => EventKind::Command(Command::RebootToBootloader),
-                2 => EventKind::Tick,
-                3 => EventKind::Rc { channels: core::array::from_fn(|_| r.next_u64() as u16 >> r.range_u64(0, 16)) },
-                4 => EventKind::MotorTelemetry { erpm: core::array::from_fn(|_| r.chance(0.7).then(|| r.next_u64() as u32 >> r.range_u64(0, 32))) },
-                _ => EventKind::Imu { gyro: [f(&mut r), f(&mut r), f(&mut r)], accel: [f(&mut r), f(&mut r), f(&mut r)] },
-            };
-            let event = Event { t_us: r.next_u64() >> r.range_u64(0, 64), kind };
-            let (mut fast, mut slow) = (i, i);
-            hash_event(&mut fast, &event);
-            hash_debug(&mut slow, &event);
-            assert_eq!(fast, slow, "{event:?}");
-
-            let mut fx = Effects::new();
-            for _ in 0..r.range_u64(0, 5) {
-                let e = match r.range_u64(0, 6) {
-                    0 | 1 => Effect::Motors([0, 48, r.range_u64(0, 2048) as u16, r.next_u64() as u16]),
-                    2 => Effect::Led(r.chance(0.5)),
-                    3 => Effect::Beeper(r.chance(0.5)),
-                    4 => Effect::Notice(Notice::Armed(FlightMode::Angle)),
-                    _ => Effect::RebootToBootloader,
-                };
-                let _ = fx.push(e);
-            }
-            let (mut fast, mut slow) = (i, i);
-            hash_effects(&mut fast, &fx);
-            hash_debug(&mut slow, &fx);
-            assert_eq!(fast, slow, "{fx:?}");
+    fn trace_hash_sees_every_field() {
+        use ironloop_fc::{Command, FlightMode};
+        let hash = |e: &Event, fx: &[Effect]| {
+            let mut h = 0xcbf2_9ce4_8422_2325;
+            hash_event(&mut h, e);
+            hash_effects(&mut h, fx);
+            h
+        };
+        let imu = EventKind::Imu { gyro: [0.1, 0.2, 0.3], accel: [0.4, 0.5, -9.8] };
+        let base = Event { t_us: 1_000, kind: imu };
+        let fx = [Effect::Motors([100, 200, 300, 400]), Effect::Led(true)];
+        let mut seen = vec![hash(&base, &fx)];
+        let mut differ = |e: Event, fx: &[Effect]| {
+            let h = hash(&e, fx);
+            assert!(!seen.contains(&h), "{e:?} {fx:?} collides");
+            seen.push(h);
+        };
+        differ(Event { t_us: 1_001, ..base }, &fx);
+        for i in 0..6 {
+            let mut v = [0.1, 0.2, 0.3, 0.4, 0.5, -9.8];
+            v[i] = -v[i];
+            differ(Event { kind: EventKind::Imu { gyro: [v[0], v[1], v[2]], accel: [v[3], v[4], v[5]] }, ..base }, &fx);
         }
+        differ(Event { kind: EventKind::Imu { gyro: [-0.0, 0.2, 0.3], accel: [0.4, 0.5, -9.8] }, ..base }, &fx);
+        differ(Event { kind: EventKind::Imu { gyro: [0.0, 0.2, 0.3], accel: [0.4, 0.5, -9.8] }, ..base }, &fx);
+        for i in 0..RC_CHANNELS {
+            let mut channels = [1500; RC_CHANNELS];
+            channels[i] = 1501;
+            differ(Event { kind: EventKind::Rc { channels }, ..base }, &fx);
+        }
+        differ(Event { kind: EventKind::Battery { volts: 4.0, amps: 1.0 }, ..base }, &fx);
+        differ(Event { kind: EventKind::Battery { volts: 1.0, amps: 4.0 }, ..base }, &fx);
+        for i in 0..4 {
+            let mut erpm = [Some(7); 4];
+            erpm[i] = None;
+            differ(Event { kind: EventKind::MotorTelemetry { erpm }, ..base }, &fx);
+            erpm[i] = Some(8);
+            differ(Event { kind: EventKind::MotorTelemetry { erpm }, ..base }, &fx);
+        }
+        differ(Event { kind: EventKind::Tick, ..base }, &fx);
+        differ(Event { kind: EventKind::Command(Command::RebootToBootloader), ..base }, &fx);
+        for i in 0..4 {
+            let mut m = [100, 200, 300, 400];
+            m[i] += 1;
+            differ(base, &[Effect::Motors(m), Effect::Led(true)]);
+        }
+        differ(base, &[Effect::Motors([100, 200, 300, 400]), Effect::Led(false)]);
+        differ(base, &[Effect::Motors([100, 200, 300, 400]), Effect::Beeper(true)]);
+        differ(base, &[Effect::Motors([100, 200, 300, 400])]);
+        differ(base, &[Effect::Led(true), Effect::Motors([100, 200, 300, 400])]);
+        differ(base, &[Effect::Notice(Notice::Armed(FlightMode::Angle)), Effect::Led(true)]);
+        differ(base, &[Effect::Notice(Notice::Armed(FlightMode::Acro)), Effect::Led(true)]);
+        differ(base, &[Effect::RebootToBootloader, Effect::Led(true)]);
     }
 
     /// The frame resonance once grew without bound when the sample interval
