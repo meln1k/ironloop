@@ -117,6 +117,7 @@ MUTANTS = {
     "runaway misses a build wedged on the ground": [(PROTECT, "let stuck = !s.flight.lifted_off && trying", "let stuck = false && trying")],
     "wedged runaway needs throttle up after a runaway disarm": [(PROTECT, "let trying = throttle > cfg.airmode_throttle || s.runaway_seen;", "let trying = throttle > cfg.airmode_throttle;")],
     "wedged runaway at low throttle once airmode engaged": [(PROTECT, "let trying = throttle > cfg.airmode_throttle || s.runaway_seen;", "let trying = s.flight.airmode_active || s.runaway_seen;")],
+    "runaway misses a build on its side that never lifted off": [(PROTECT, "let on_side = !s.flight.lifted_off && trying", "let on_side = false && trying")],
     "yaw growth counts a ground hit's spin-up": [(PROTECT, "const YAW_HIT_ACCEL: f32 = 400.0;", "const YAW_HIT_ACCEL: f32 = 1e9;")],
     "runaway detection ends after 0.5 s of throttle alone": [
         (PROTECT, "if throttle > cfg.airmode_throttle && s.flight.lifted_off && upright && !pid_high && (!spinning || flown) {", "if throttle > cfg.airmode_throttle {"),

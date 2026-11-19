@@ -78,10 +78,13 @@ fn generated_scenarios_hold_every_property_and_replay_identically() {
 /// Seed 45798's mistakes cancel in
 /// the rate loops (IMU a quarter turn off, an axis flipped, two motors
 /// swapped), so it flies until the pilot's corrections tip it; the monitor
-/// once demanded that runaway detection stop it.
+/// once demanded that runaway detection stop it. Seed 70904 (IMU x axis
+/// flipped) tips onto its side on takeoff and rolls there with the
+/// throttle up; its attitude estimate tumbles and the frame follows every
+/// demand as the gyro reads it, so only the ground's side load shows it.
 #[test]
 fn regression_seeds_hold_every_property() {
-    for seed in [1531, 822, 3007, 6875, 3934, 838, 88, 445, 519, 70, 688, 257, 209, 741, 1360, 1979, 290248, 445159, 34731, 315882, 4285, 6018, 42067, 7861, 73501, 45798, 49056, 78109, 36096, 2882] {
+    for seed in [1531, 822, 3007, 6875, 3934, 838, 88, 445, 519, 70, 688, 257, 209, 741, 1360, 1979, 290248, 445159, 34731, 315882, 4285, 6018, 42067, 7861, 73501, 45798, 49056, 78109, 36096, 2882, 70904] {
         let r = run_seed(seed);
         assert!(r.violations.is_empty(), "seed {seed} [{}]: {:?}", r.name, r.violations);
     }

@@ -238,6 +238,10 @@ struct Flight {
     /// Since when the frame, never lifted off, has not turned the way the
     /// controller asks (`runaway_and_crash`).
     stuck_since_us: Option<u64>,
+    /// Since when the frame, never lifted off, has had the ground pushing
+    /// on its side, and the last step on which it did.
+    on_side_since_us: Option<u64>,
+    on_side_last_us: u64,
     runaway_ok_us: u64,
     /// Since arming, the climb estimate has shown the quad rising while
     /// upright: it left the ground under its own thrust.

@@ -105,7 +105,7 @@ angle_tracks                   [flight] In an angle-mode stick script, roll and 
 
 **Metamorphic tests** in `crates/ironloop-fc/src/tests.rs` check the mixer against Betaflight's QuadX table and mirror every input left-right and front-back and require mirrored motor outputs. They need no oracle and catch anything that treats the two sides differently, such as one wrong mixer entry or two axes mixed up; a sign flipped consistently on a whole axis stays symmetric, and the DST catches those.
 
-**Mutants.** `scripts/mutants.py` reintroduces 66 real flight-controller bugs and config mistakes, one at a time, and runs the DST sweep, the firmware unit tests, and the simulator tests against each, and type-checks the board firmware. It first records what fails on the unmodified firmware, and counts a mutant as caught only when something new fails: a test, or a property on a seed where it held before (`dst --list-failures` lists every failing seed).
+**Mutants.** `scripts/mutants.py` reintroduces 67 real flight-controller bugs and config mistakes, one at a time, and runs the DST sweep, the firmware unit tests, and the simulator tests against each, and type-checks the board firmware. It first records what fails on the unmodified firmware, and counts a mutant as caught only when something new fails: a test, or a property on a seed where it held before (`dst --list-failures` lists every failing seed).
 
 **Known limits.**
 

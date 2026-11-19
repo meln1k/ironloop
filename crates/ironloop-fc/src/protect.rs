@@ -38,6 +38,10 @@ const YAW_HIT_ACCEL: f32 = 400.0;
 /// asks, never lifted off, before it counts as a runaway.
 const STUCK_RUNAWAY_US: u64 = 1_000_000;
 
+/// A frame rolling or spinning on its side leaves the side load for less
+/// than this (µs) on each bounce; that is not getting off it.
+const ON_SIDE_GAP_US: u64 = 200_000;
+
 /// Climb (m/s, from `vz_est`) that shows an upright quad left the ground.
 const LIFTOFF_CLIMB: f32 = 0.5;
 
@@ -130,11 +134,28 @@ pub(crate) fn runaway_and_crash(s: &mut State, gyro: Vec3, accel: Vec3, throttle
         let trying = throttle > cfg.airmode_throttle || s.runaway_seen;
         let stuck = !s.flight.lifted_off && trying && wants > 2.0 && slow.dot(demand) < wants;
         let stuck_for = held_for(&mut s.flight.stuck_since_us, stuck, now);
+        // Or on its side: the force holding the frame up comes from more
+        // than 50 degrees off its thrust axis. Thrust and drag both act
+        // along that axis in flight, so only something solid does this,
+        // and the accelerometer sees it whatever the attitude estimate
+        // says (a build with an IMU axis the wrong way round, rolling or
+        // spinning on its side, makes the estimate tumble while the frame
+        // follows every demand, as the gyro reads it).
+        let a = accel.norm();
+        let on_side = !s.flight.lifted_off && trying && a > 0.5 * GRAVITY && -accel.z < 0.64 * a;
+        if on_side {
+            s.flight.on_side_since_us.get_or_insert(now);
+            s.flight.on_side_last_us = now;
+        } else if now.saturating_sub(s.flight.on_side_last_us) > ON_SIDE_GAP_US {
+            s.flight.on_side_since_us = None;
+        }
+        let on_side_for = s.flight.on_side_since_us.map_or(0, |t| now - t);
         if (runaway && runaway_for >= cfg.runaway_us)
             || (yaw_opposed && yaw_opposed_for >= YAW_RUNAWAY_US)
             || yaw_grown
             || (clipped && clipped_for >= CLIPPED_RUNAWAY_US)
             || stuck_for >= STUCK_RUNAWAY_US
+            || on_side_for >= STUCK_RUNAWAY_US
         {
             disarm(s, DisarmReason::RunawayTakeoff, fx);
             s.runaway_tripped = true;
