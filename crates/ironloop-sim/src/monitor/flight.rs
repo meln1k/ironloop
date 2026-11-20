@@ -32,7 +32,7 @@ pub static SAG_COMPENSATED: Property = Property {
 
 pub static MOTORS_QUIET: Property = Property {
     name: "motors_quiet",
-    doc: "[flight] In steady hover or cruise, no motor command jitters above 30 Hz by more than 7.5% of full range (RMS over 0.5 s).",
+    doc: "[flight] In steady hover or cruise, no motor command jitters above 30 Hz by more than 4.5% of full range (RMS over 0.5 s).",
 };
 
 #[derive(Clone, Debug, Default)]

@@ -10,6 +10,11 @@
 use crate::math::Vec3;
 
 pub const MAX_HARMONICS: usize = 3;
+/// Highest notch, as a fraction of the sample rate; a notch at the Nyquist
+/// frequency has its poles on the unit circle. At 0.45 a 1.6 kHz IMU left
+/// harmonics that alias to 720-790 Hz unnotched, and the gyro low-pass
+/// barely cuts them (seeds 18994, 16611, 11868).
+const MAX_FRAC: f32 = 0.49;
 
 /// A second-order notch (RBJ cookbook) on all three axes, direct form II
 /// transposed.
@@ -27,10 +32,17 @@ impl Notch {
     /// `input` is the latest gyro sample: a notch switching on starts as if
     /// it had been passing it all along, not from zero (which would kick the
     /// output by the whole gyro rate).
-    /// `(s, c)` are the sine and cosine of the notch frequency in radians
-    /// per sample, 0..pi.
-    pub(crate) fn tune(&mut self, (s, c): (f32, f32), q: f32, input: Vec3) {
-        let alpha = s / (2.0 * q);
+    /// `w0` is the notch frequency in radians per sample, 0..pi, and
+    /// `(s, c)` its sine and cosine.
+    pub(crate) fn tune(&mut self, w0: f32, (s, c): (f32, f32), q: f32, input: Vec3) {
+        // The bandwidth Q asks for, in RBJ's bandwidth form with its
+        // frequency warping. Without the warping (`s / 2q`), a notch's
+        // width shrinks with `s` toward Nyquist: at 0.45-0.48 of the sample
+        // rate it was too narrow to follow the eRPM's tone and rang at every
+        // retune, which the rate loop picked up (seeds 27033 and 14921 went
+        // from under 1% to 3-4% motor jitter). Elsewhere it is nearly the
+        // same notch.
+        let alpha = s * libm::sinhf(libm::asinhf(0.5 / q) * w0 / s);
         let a0 = 1.0 + alpha;
         let was_off = self.c.is_none();
         self.c = Some([1.0 / a0, -2.0 * c / a0, 1.0 / a0, -2.0 * c / a0, (1.0 - alpha) / a0]);
@@ -105,8 +117,8 @@ impl RpmFilter {
         let mut w = w1;
         for (h, n) in self.notches[i].iter_mut().enumerate() {
             let at = alias(f * (h + 1) as f32, sample_hz);
-            if h < harmonics && (min_hz..0.45 * sample_hz).contains(&at) {
-                n.tune((w.0.abs(), w.1), q, self.last_input);
+            if h < harmonics && (min_hz..MAX_FRAC * sample_hz).contains(&at) {
+                n.tune(2.0 * core::f32::consts::PI * at / sample_hz, (w.0.abs(), w.1), q, self.last_input);
             } else {
                 *n = Notch::OFF;
             }
@@ -183,6 +195,15 @@ mod tests {
         f.set_motor(0, Some(1100.0), 1600.0, 2, 3.0, 100.0);
         assert!(gain(&mut f.clone(), 2200.0, 1600.0) < 0.05);
         assert!(gain(&mut f, 200.0, 1600.0) > 0.9);
+        // Near Nyquist too: at 1.6 kHz a 286 Hz rotation's blade pass,
+        // 858 Hz, appears at 742 Hz, 0.46 of the sample rate.
+        let mut f = RpmFilter::default();
+        f.set_motor(0, Some(286.0), 1600.0, 3, 8.0, 100.0);
+        assert!(gain(&mut f.clone(), 858.0, 1600.0) < 0.05);
+        // ...and wide enough there to cut a tone the eRPM puts a few Hz off
+        // (288 Hz: 864 Hz, at 736 Hz).
+        assert!(gain(&mut f.clone(), 864.0, 1600.0) < 0.2);
+        assert!(gain(&mut f, 200.0, 1600.0) > 0.9);
     }
 
     #[test]
@@ -192,8 +213,8 @@ mod tests {
         f.set_motor(1, None, fs, 3, 3.0, 100.0);
         f.set_motor(3, Some(60.0), fs, 1, 3.0, 100.0);
         assert_eq!(f, RpmFilter::default());
-        // 1,500 Hz is too close to the 1,600 Hz Nyquist limit to notch.
-        f.set_motor(0, Some(1500.0), fs, 1, 3.0, 100.0);
+        // 1,580 Hz is too close to the 1,600 Hz Nyquist limit to notch.
+        f.set_motor(0, Some(1580.0), fs, 1, 3.0, 100.0);
         assert_eq!(f, RpmFilter::default());
     }
 

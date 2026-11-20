@@ -279,6 +279,9 @@ pub struct State {
     rpm_filter: rpm::RpmFilter,
     /// Notches the strongest vibration tone while the RPM filter is off.
     dyn_notch: dyn_notch::DynNotch,
+    /// The last gyro sample (body frame, bias removed), to fill a missed
+    /// one with.
+    prev_gyro_sample: Vec3,
     /// When each motor's eRPM last arrived; the RPM filter drops a motor
     /// whose telemetry goes stale.
     rpm_at_us: [Option<u64>; 4],
@@ -369,6 +372,7 @@ impl State {
             gyro_lpf: Lpf::default(),
             rpm_filter: rpm::RpmFilter::default(),
             dyn_notch: dyn_notch::DynNotch::default(),
+            prev_gyro_sample: Vec3::ZERO,
             rpm_at_us: [None; 4],
             imu_period: 0.0,
             dterm_lpf: Lpf::default(),

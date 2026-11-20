@@ -130,8 +130,8 @@ impl DynNotch {
         let d = if dd > 0.0 { ((num.0 * den.0 + num.1 * den.1) / dd).clamp(-0.5, 0.5) } else { 0.0 };
         let at = best as f32 + d;
         self.peak = if self.peak == 0.0 { at } else { self.peak + (at - self.peak) * 0.5 };
-        let (s, c) = sin_cos(2.0 * core::f32::consts::PI * self.peak / N as f32);
-        self.notch.tune((s, c), q, self.last_input);
+        let w0 = 2.0 * core::f32::consts::PI * self.peak / N as f32;
+        self.notch.tune(w0, sin_cos(w0), q, self.last_input);
     }
 
     pub fn reset(&mut self, v: Vec3) {

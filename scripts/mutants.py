@@ -42,6 +42,7 @@ MON_PROTECT = "crates/ironloop-sim/src/monitor/protect.rs"
 SIM = "crates/ironloop-sim/src/sim.rs"
 PHYSICS = "crates/ironloop-sim/src/physics.rs"
 CONFIG = "crates/ironloop-fc/src/config.rs"
+RPM = "crates/ironloop-fc/src/rpm.rs"
 
 MIX_OK = """    [-1.0, -1.0, 1.0],
     [-1.0, 1.0, -1.0],
@@ -86,6 +87,9 @@ MUTANTS = {
     "estimator bias integral sign flipped": [(IMU, "err * (0.15 * weight * dt)", "err * (-0.15 * weight * dt)")],
     "estimator learns bias from a push (integral gain 0.3)": [(IMU, "err * (0.15 * weight * dt)", "err * (0.3 * weight * dt)")],
     "dynamic notch off": [(CONFIG, "dyn_notch_q: 3.0,", "dyn_notch_q: 0.0,")],
+    "missed IMU sample not filled": [(IMU, "let missed = s.imu_period > 0.0 && dt > 1.5 * s.imu_period;", "let missed = false;")],
+    "RPM notches stop at 0.45 of the sample rate": [(RPM, "const MAX_FRAC: f32 = 0.49;", "const MAX_FRAC: f32 = 0.45;")],
+    "notch width shrinks toward Nyquist": [(RPM, "let alpha = s * libm::sinhf(libm::asinhf(0.5 / q) * w0 / s);", "let alpha = s / (2.0 * q) + 0.0 * w0;")],
     # Control.
     "yaw mixer sign inverted (props-in)": [(CONTROL, MIX_OK, MIX_YAW_INVERTED)],
     "D-term sign flipped": [(CONTROL, "+ integral[i] - k.d * d[i]", "+ integral[i] + k.d * d[i]")],

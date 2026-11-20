@@ -30,8 +30,11 @@ pub const REQ_IMU_TOLERATE_US: u64 = 10_000;
 pub const REQ_ESC_FEED_US: u64 = 5_000;
 /// In steady flight, motor commands jitter above this frequency (Hz)...
 pub const REQ_QUIET_ABOVE_HZ: f32 = 30.0;
-/// ...by at most this RMS fraction of full range.
-pub const REQ_QUIET_RMS: f32 = 0.075;
+/// ...by at most this RMS fraction of full range. The firmware jitters at
+/// most 3.9% in seeds 0-29999 (27543: a tone at exactly the Nyquist
+/// frequency, which no notch can take); a 250 Hz D-term low-pass or a
+/// 500 Hz gyro low-pass goes past 4.5% (seed 1971). At 7.5% neither did.
+pub const REQ_QUIET_RMS: f32 = 0.045;
 /// Arming is never allowed tilted further than this (rad).
 pub const REQ_ARM_TILT: f32 = 33.0 * core::f32::consts::PI / 180.0;
 /// Tilted past this (rad) on the ground, the quad has tipped over: lying

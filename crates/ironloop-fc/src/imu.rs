@@ -113,12 +113,22 @@ pub(crate) fn on_imu(s: &mut State, gyro: [f32; 3], accel: [f32; 3], fx: &mut Ou
         calibrate(s, g, a, fx);
     }
     let g = g - s.cal.bias;
+    let prev_g = core::mem::replace(&mut s.prev_gyro_sample, g);
     let gyro_f = if reset_dynamics {
         s.rpm_filter.reset(g);
         s.dyn_notch.reset(g);
         s.gyro_lpf.y = g;
         g
     } else {
+        // A sample lost on the way (a missed data-ready edge, a dropped
+        // event) leaves a gap of two periods. The notches count samples, not
+        // time: fed the next sample as if it were the one after, a tone's
+        // phase jumps and they let it through, and the period they are
+        // placed by comes out long (seed 14005 lost 18% of its samples and
+        // jittered the motors 5%). So the gap counts as two periods, and the
+        // filters get the missing sample as the mean of its neighbours.
+        let missed = s.imu_period > 0.0 && dt > 1.5 * s.imu_period;
+        let dt = if missed { dt * 0.5 } else { dt };
         s.imu_period = if s.imu_period == 0.0 { dt } else { s.imu_period + (dt - s.imu_period) * 0.01 };
         // A motor whose eRPM stopped coming loses its notches.
         for i in 0..4 {
@@ -129,10 +139,17 @@ pub(crate) fn on_imu(s: &mut State, gyro: [f32; 3], accel: [f32; 3], fx: &mut Ou
         }
         let rpm_on = s.cfg.rpm_filter_harmonics > 0 && s.rpm_at_us.iter().all(Option::is_some);
         let hz = if rpm_on { s.cfg.gyro_lpf_rpm_hz } else { s.cfg.gyro_lpf_hz };
-        let notched = s.rpm_filter.apply(g);
         let min_bin = s.cfg.rpm_filter_min_hz * dyn_notch::N as f32 * s.imu_period;
-        let notched = s.dyn_notch.apply(notched, !rpm_on && s.cfg.dyn_notch_q > 0.0, s.cfg.dyn_notch_q, min_bin);
-        s.gyro_lpf.update(notched, hz, dt)
+        let dyn_on = !rpm_on && s.cfg.dyn_notch_q > 0.0;
+        let filter = |s: &mut State, g: Vec3| {
+            let notched = s.rpm_filter.apply(g);
+            let notched = s.dyn_notch.apply(notched, dyn_on, s.cfg.dyn_notch_q, min_bin);
+            s.gyro_lpf.update(notched, hz, dt)
+        };
+        if missed {
+            filter(s, (prev_g + g) * 0.5);
+        }
+        filter(s, g)
     };
     let accel_f = if reset_dynamics {
         s.accel_lpf.y = a;
