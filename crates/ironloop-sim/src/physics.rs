@@ -441,7 +441,10 @@ const CONTACT_C: f32 = 1.2;
 /// `sound` is false while a fault stops the motor, which is judged
 /// separately.
 fn esc(m: &mut Motor, f: &Airframe, cmd: f32, now: u64, sound: bool) -> f32 {
-    if cmd <= 0.0 {
+    // A fault that stops the motor leaves the ESC to start it again once it
+    // clears, not to find it already stopped and count a stall of its own
+    // (seed 42067).
+    if cmd <= 0.0 || !sound {
         m.esc = Esc::Stopped;
         return 0.0;
     }

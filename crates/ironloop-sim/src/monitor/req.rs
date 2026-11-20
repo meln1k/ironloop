@@ -85,6 +85,12 @@ pub const REQ_ANGLE_LIMIT: f32 = 55.0 * core::f32::consts::PI / 180.0;
 pub const REQ_ANGLE_REACH: (f32, f32) = (0.75, 1.15);
 /// Hands off in acro the roll and pitch rates settle: RMS below this (rad/s).
 pub const REQ_SETTLED_RMS: f32 = 0.4;
+/// A stick script is not scored on the response to a frame off the
+/// script (a corrupted one) for this long after it (µs): one frame at full
+/// stick asks for more than the motors can give, which the first-order
+/// reference does not model, and the quad takes about this long to come
+/// back (seeds 48969, 136715, 143014, 445159, 34731, 271939).
+pub const REQ_OFF_SCRIPT_RESPONSE_US: u64 = 100_000;
 /// Failsafe hold: thrust within 30% of weight (vertical acceleration m/s²).
 pub const REQ_HOLD_ACCEL: f32 = 3.0;
 /// Battery notices need the pack truly below these within the last 2 s (V):

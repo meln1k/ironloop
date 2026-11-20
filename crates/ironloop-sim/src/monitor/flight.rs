@@ -38,8 +38,6 @@ pub static MOTORS_QUIET: Property = Property {
 #[derive(Clone, Debug, Default)]
 pub struct Flight {
     est_bad_since: Option<u64>,
-    /// Last time the true rotation rate was beyond the gyro's range.
-    gyro_saturated_us: Option<u64>,
     /// True pack voltage averaged over about 0.5 s.
     volts_avg: f32,
     sag: SagWindow,
@@ -79,15 +77,7 @@ impl Flight {
             libm::acosf(est_up.dot(true_up).clamp(-1.0, 1.0)).to_degrees()
         });
 
-        // A rotation beyond the gyro's range loses the attitude, and in
-        // flight the accelerometer reads mostly thrust, so the estimate
-        // takes a few seconds to come back (Betaflight's too); until then
-        // `estimate_reconverges` judges it instead.
-        if world.body.omega.max_abs() >= cx.sc.imu.gyro_range * 0.97 {
-            self.gyro_saturated_us = Some(t);
-        }
-        let recovering = self.gyro_saturated_us.is_some_and(|s| t - s < REQ_RECONVERGE_US);
-        if let Some(err) = est_err.filter(|_| !cx.wild && !recovering) {
+        if let Some(err) = est_err.filter(|_| !cx.wild && !cx.reconverging) {
             v.live(&ESTIMATE_TRACKS);
             v.stats.max_est_err_deg = v.stats.max_est_err_deg.max(err);
             if err > REQ_ESTIMATE_DEG {

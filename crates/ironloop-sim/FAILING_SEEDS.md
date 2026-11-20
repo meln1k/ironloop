@@ -163,10 +163,29 @@ Wind 4, a bent prop, a critical pack. From 72.8 s to about 85 s the link drops a
 
 ### Control quality: 9 seeds (`rate_tracks`, `angle_tracks`, `settles`)
 
-Status: open.
+Status: fixed in the monitor (oracle problems, not the controller); 445159, 34731, and 315882 are regression seeds.
 
 - `rate_tracks` 48969, 136715, 143014, 445159: roll rate off by 38–39% RMS; all have `rc-glitch` or `fc-stall` during a stick script.
 - `angle_tracks` 133604, 315882, 725433: stick holds reach 69–74% of the commanded angle; 133604 also fails `estimate_tracks`.
 - `settles` 34731, 271939: 0.43–0.50 rad/s hands-off roll and pitch; 34731 toggles Angle and Acro several times within 1 s at 13.7 s.
 
 Likely glitched frames or stalls inside the scoring window, so the excuse windows may need adjusting rather than the controller.
+
+Cause, `rate_tracks` and `settles` (6 seeds): in each, one RC frame that passes the CRC (`rc-glitch`) sets a stick near full for one frame, inside a low-amplitude stick hold or the hands-off window. The firmware follows it as far as the motors allow; the first-order reference does not model that, and the 50-150 ms of response carried most of the RMS error. None had `fc-stall` inside the script. The response to a frame off the script is no longer scored for 100 ms after it (`REQ_OFF_SCRIPT_RESPONSE_US`); 0.1 s of off-script sticks still voids the run.
+
+Cause, `angle_tracks`: 315882 starts its script 3.2 s after an impact saturates the gyro, inside the 4 s in which `estimate_tracks` excuses the estimate (17 deg off here); angle mode tilts as far as that estimate says. `angle_tracks` now shares the saturation window (`Cx::reconverging`). 133604 and 725433 also fail `estimate_tracks`: the estimate itself is dragged off 4-5 s after a saturation (see the `estimate_tracks` section).
+
+### `no_esc_stall` (401 in 1M): the weakened motor stalls
+
+Status: fixed in the monitor and the sim (oracle and sim problems); 4285 and 42067 are regression seeds.
+
+All 10 failures in seeds 0-29999 have `motor-degraded`, and in every one the motor that loses sync is the degraded one (60-74% strength), at idle on a pack at 3.0-3.6 V: a weak motor at 10% idle on a sagging pack spins under the ESC's sync limit. The property promises "no ESC loses sync on a sound motor", but the simulated ESC counts any motor still turning as sound, so the monitor counted these. It now judges each motor's stalls only while that motor is healthy. The idle itself holds: with the fix, seeds 0-29999 have no `no_esc_stall` failure, and the "motor idle 5.5%" mutant is still caught.
+
+Seeds 30000-129999 had one more, 42067, on a sound motor: a 190 ms `MotorDesync` on a 3.12 V pack. The simulated ESC stayed `Running` through the fault, so when it cleared it found the motor stopped and, its start ramp capped by that speed, counted a stall 30 ms later. A real ESC that loses sync starts the motor again; the sim's ESC now does too (a sim problem). The restart keeps a desynced motor out for its 50-250 ms open-loop start, so more desyncs tumble the quad: on seeds 30000-129999 `no_esc_stall` now passes everywhere, while `estimate_tracks` goes 211 -> 230, and 22 of the 29 new ones fail 4.0-5.7 s after the gyro saturates, the open post-saturation pull below.
+
+### `motors_quiet` (491 in 1M): a bent prop without eRPM
+
+Status: open, needs a decision (a missing filter, not a bug).
+
+16 of the 17 failures in seeds 0-29999 have both `bent-prop` and `no-telemetry`, and all sit just over the limit (7.5-8.8% RMS). Without eRPM there is no RPM filter, and the 150 Hz gyro low-pass lets the bent prop's shaft-rate tone through to the motors. With telemetry forced on, the same seeds jitter 0.8-1.8%. Betaflight covers this case with its dynamic (FFT) notch. Options: add a dynamic notch, lower the gyro low-pass when eRPM is missing (more lag), or accept it for bent props without bidirectional DShot. The 17th, 7536, is `rc-glitch` corrupting 25% of frames in a 45 m hover (throttle jumps to 100%), the same corrupted-frame issue as the stick scripts above.
+

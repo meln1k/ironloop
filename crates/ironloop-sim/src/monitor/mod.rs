@@ -32,7 +32,7 @@ mod protect;
 pub mod req;
 mod script;
 
-use req::REQ_NO_FAILSAFE_BEFORE_US;
+use req::{REQ_NO_FAILSAFE_BEFORE_US, REQ_RECONVERGE_US};
 
 /// A property the monitor checks.
 #[derive(Debug)]
@@ -193,6 +193,13 @@ struct Cx<'a> {
     excused: bool,
     /// Inside a deliberate wild maneuver or the 3 s after it.
     wild: bool,
+    /// Within `REQ_RECONVERGE_US` of the true rate going beyond the
+    /// gyro's range: that loses the attitude, and in flight the
+    /// accelerometer reads mostly thrust, so the estimate takes a few
+    /// seconds to come back (Betaflight's too). Until then
+    /// `estimate_reconverges` judges it, and nothing that needs the
+    /// estimate right (`estimate_tracks`, `angle_tracks`) is judged.
+    reconverging: bool,
     imu_step: bool,
     /// Time since the previous IMU step (at most 5 ms), or 0 on other steps.
     imu_dt: f32,
@@ -363,6 +370,8 @@ pub struct Monitor {
     last_t: u64,
     /// (speed, vertical speed downward) in the last airborne step.
     airborne_speed: Option<(f32, f32)>,
+    /// Last time the true rotation rate was beyond the gyro's range.
+    gyro_saturated_us: Option<u64>,
 }
 
 impl Monitor {
@@ -377,6 +386,9 @@ impl Monitor {
             self.airborne_speed = Some((world.body.vel.norm(), world.body.vel.z));
             None
         };
+        if world.body.omega.max_abs() >= sc.imu.gyro_range * 0.97 {
+            self.gyro_saturated_us = Some(t);
+        }
         let cx = Cx {
             t,
             event,
@@ -391,6 +403,7 @@ impl Monitor {
             flying: after.armed && !on_ground && alt > 0.15,
             excused: sc.unflyable() || excuses(sc, t, |e| e != Excuse::Nothing),
             wild: wild(sc, t),
+            reconverging: self.gyro_saturated_us.is_some_and(|s| t - s < REQ_RECONVERGE_US),
             imu_step,
             imu_dt: if imu_step { t.saturating_sub(self.imu.last_us).min(5_000) as f32 * 1e-6 } else { 0.0 },
             touchdown,

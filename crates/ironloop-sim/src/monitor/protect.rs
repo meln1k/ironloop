@@ -60,8 +60,8 @@ pub struct Protect {
     motor_bad_us: [Option<u64>; 4],
     stall_since: [Option<u64>; 4],
     fault_reported: [bool; 4],
-    /// ESC stalls seen so far, all motors.
-    esc_stalls: u32,
+    /// ESC stalls seen so far, per physical motor.
+    esc_stalls: [u32; 4],
 }
 
 impl Protect {
@@ -123,12 +123,17 @@ impl Protect {
             self.crit_since = None;
         }
 
-        let stalls = world.motors.iter().map(|m| m.stalls).sum::<u32>();
+        // A weakened motor (`MotorDegraded`) spins slower than idle asks
+        // for and may lose sync; only a sound motor's stall is the idle's
+        // fault (seeds 1324, 4285, 5303 and 7 more in 0-29999, each on the
+        // degraded motor).
+        let stalls = world.motors.each_ref().map(|m| m.stalls);
         if before.armed {
             v.live(&NO_ESC_STALL);
-            if stalls > self.esc_stalls {
-                let i = world.motors.iter().position(|m| matches!(m.esc, Esc::Stalled { .. })).unwrap_or(0);
-                v.fail(t, &NO_ESC_STALL, format!("motor {i} lost sync at {:.2} V", world.battery.volts));
+            for (i, m) in world.motors.iter().enumerate() {
+                if stalls[i] > self.esc_stalls[i] && m.health == MotorHealth::Ok {
+                    v.fail(t, &NO_ESC_STALL, format!("motor {i} lost sync at {:.2} V", world.battery.volts));
+                }
             }
         }
         self.esc_stalls = stalls;

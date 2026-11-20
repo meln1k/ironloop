@@ -48,9 +48,20 @@ fn generated_scenarios_hold_every_property_and_replay_identically() {
 /// Seed 290248 stalls the control loop as the IMU drops out, so the last
 /// sample waits behind events queued later; stepping the queue first once
 /// set time back 10 ms and reported `ClockWentBackwards`.
+/// Seeds 445159 and 34731 get one corrupted RC frame at near full stick in
+/// a stick script, which `rate_tracks` and `settles` once scored as the
+/// quad's tracking.
+/// Seed 315882 starts an angle-mode stick script 3 s after an impact
+/// saturates the gyro, which `angle_tracks` once judged while the estimate
+/// it flies by was still excused.
+/// Seed 4285 loses sync on its weakened motor at idle on a sagging pack,
+/// which `no_esc_stall` once counted as a sound motor's stall.
+/// Seed 42067 desyncs a sound motor for 190 ms on a sagging pack; the
+/// simulated ESC once kept running through the fault and, finding the
+/// motor stopped when it cleared, counted a stall of its own.
 #[test]
 fn regression_seeds_hold_every_property() {
-    for seed in [1531, 822, 3007, 6875, 3934, 838, 88, 445, 519, 70, 688, 257, 209, 741, 1360, 1979, 290248] {
+    for seed in [1531, 822, 3007, 6875, 3934, 838, 88, 445, 519, 70, 688, 257, 209, 741, 1360, 1979, 290248, 445159, 34731, 315882, 4285, 42067] {
         let r = run_seed(seed);
         assert!(r.violations.is_empty(), "seed {seed} [{}]: {:?}", r.name, r.violations);
     }

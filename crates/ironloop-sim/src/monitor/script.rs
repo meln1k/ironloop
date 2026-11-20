@@ -39,6 +39,9 @@ struct Run {
     /// Time the sticks disagreed with the script (the pilot was landing a
     /// low pack, or a frame was corrupted), s.
     off_script: f32,
+    /// Until then the quad is still responding to sticks off the script,
+    /// which is not scored.
+    unscored_until_us: u64,
 }
 
 impl Run {
@@ -54,6 +57,7 @@ impl Run {
             settle2: 0.0,
             settle_n: 0,
             off_script: 0.0,
+            unscored_until_us: 0,
         }
     }
 
@@ -62,6 +66,9 @@ impl Run {
             return;
         }
         match self.mode {
+            // A hold spent entirely responding to corrupted frames has
+            // nothing to judge (seed 2407).
+            FlightMode::Angle if self.reach.iter().flatten().any(|&r| r == f32::MIN) => {}
             FlightMode::Angle => {
                 v.live(&ANGLE_TRACKS);
                 let r = self.reach.iter().flatten().sum::<f32>() / 4.0;
@@ -103,6 +110,7 @@ impl Run {
         let sticks = link.rc_sticks.map(ch);
         if (0..3).any(|i| (sticks[i] - script[i]).abs() > 0.02) {
             self.off_script += cx.imu_dt;
+            self.unscored_until_us = cx.t + REQ_OFF_SCRIPT_RESPONSE_US;
         }
         let sp = [req_rate(sticks[0]), -req_rate(sticks[1]), req_rate(sticks[2])];
         let omega = cx.world.body.omega;
@@ -110,6 +118,9 @@ impl Run {
         let k = (cx.imu_dt / REQ_RATE_TAU).min(1.0);
         for i in 0..3 {
             self.reference[i] += (sp[i] - self.reference[i]) * k;
+        }
+        if cx.t < self.unscored_until_us {
+            return;
         }
         if let Some((axis, k)) = held {
             if axis <= 1 {
@@ -150,7 +161,10 @@ impl Script {
         let Some((start_us, amp)) = script else { return };
         let after = cx.after;
         let run = self.run.get_or_insert_with(|| Run::new(start_us, after.mode));
-        if !cx.flying || cx.excused || after.failsafe != FailsafeStage::None || after.mode != run.mode || cx.alt < 1.0 {
+        // Angle mode tilts the quad as far as the estimate says; while the
+        // estimate may be off after a gyro saturation, so may the tilt.
+        let estimate_off = after.mode == FlightMode::Angle && cx.reconverging;
+        if !cx.flying || cx.excused || estimate_off || after.failsafe != FailsafeStage::None || after.mode != run.mode || cx.alt < 1.0 {
             run.valid = false;
         }
         if cx.imu_step && run.valid {

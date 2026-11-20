@@ -37,7 +37,10 @@ CONTROL = "crates/ironloop-fc/src/control.rs"
 FAILSAFE = "crates/ironloop-fc/src/failsafe.rs"
 PROTECT = "crates/ironloop-fc/src/protect.rs"
 MON = "crates/ironloop-sim/src/monitor/mod.rs"
+SCRIPT = "crates/ironloop-sim/src/monitor/script.rs"
+MON_PROTECT = "crates/ironloop-sim/src/monitor/protect.rs"
 SIM = "crates/ironloop-sim/src/sim.rs"
+PHYSICS = "crates/ironloop-sim/src/physics.rs"
 
 MIX_OK = """    [-1.0, -1.0, 1.0],
     [-1.0, 1.0, -1.0],
@@ -148,7 +151,19 @@ MUTANTS = {
     )],
     # The checker or the board model failing sound firmware; the regression
     # seeds catch each.
+    "monitor: the response to a corrupted RC frame is scored": [(
+        SCRIPT,
+        "self.unscored_until_us = cx.t + REQ_OFF_SCRIPT_RESPONSE_US;",
+        "self.unscored_until_us = cx.t;",
+    )],
+    "monitor: angle mode judged while the estimate reconverges": [(
+        SCRIPT,
+        "let estimate_off = after.mode == FlightMode::Angle && cx.reconverging;",
+        "let estimate_off = false;",
+    )],
+    "monitor: a weakened motor's stall counts": [(MON_PROTECT, "if stalls[i] > self.esc_stalls[i] && m.health == MotorHealth::Ok {", "if stalls[i] > self.esc_stalls[i] {")],
     "board: queued events stepped before an older IMU sample": [(SIM, "(Some((imu, _)), Some((queued, _))) => imu < queued,", "(Some((imu, _)), Some((queued, _))) => imu < queued && false,")],
+    "sim: the ESC runs through a desync": [(PHYSICS, "if cmd <= 0.0 || !sound {", "if cmd <= 0.0 {")],
 }
 
 
