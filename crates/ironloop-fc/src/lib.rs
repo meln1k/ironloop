@@ -208,12 +208,13 @@ struct Rc {
 }
 
 /// What the firmware knows about the current flight. Arming starts a new
-/// one, so nothing from an earlier flight carries over.
+/// one, so nothing from an earlier flight carries over except the vertical
+/// speed, which is integrated disarmed too.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 struct Flight {
     /// Leaky integral of vertical acceleration (m/s, down positive). It
     /// forgets steady motion over a few seconds, but shows climbs and
-    /// descents as they start and end.
+    /// descents as they start and end. Kept across arming.
     vz_est: f32,
     airmode_active: bool,
     integral: Vec3,
@@ -309,6 +310,8 @@ pub struct State {
     /// Throttle that holds altitude, learned while flying, as it would be
     /// with the pack at the reference voltage (see `sag_ratio`).
     hover_throttle: f32,
+    /// Level flight that has taught `hover_throttle` since power-up.
+    hover_learned_us: u64,
     /// Failsafe landing: throttle taken off (fraction of hover) because the
     /// quad is neither sinking nor speeding up. Large and still not
     /// accelerating means on the ground.
@@ -391,6 +394,7 @@ impl State {
             failsafe_since_us: 0,
             throttle_at_loss: 0.0,
             hover_throttle: cfg.hover_throttle_guess,
+            hover_learned_us: 0,
             landing_trim: 0.0,
             landing_vz_ref: (0, 0.0),
             landing_accel: f32::MAX,
@@ -623,7 +627,9 @@ fn on_rc(s: &mut State, channels: &[u16; RC_CHANNELS], fx: &mut Out) {
         let blockers = s.arm_blockers();
         if blockers.is_empty() {
             s.armed = true;
-            s.flight = Flight::default();
+            // The vertical speed is the quad's, not the flight's: it may
+            // be re-armed falling.
+            s.flight = Flight { vz_est: s.flight.vz_est, ..Flight::default() };
             // Runaway detection catches a build that cannot fly. Once this
             // power-up has shown it flies, a re-arm (even mid-air, to save a
             // fall) must not mistake the fight back from a crash for one;

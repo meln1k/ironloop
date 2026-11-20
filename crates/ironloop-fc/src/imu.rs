@@ -144,6 +144,7 @@ pub(crate) fn on_imu(s: &mut State, gyro: [f32; 3], accel: [f32; 3], fx: &mut Ou
     };
 
     estimate_attitude(s, g, accel_f, dt);
+    control::vertical_speed(s, accel_f, dt);
     if s.armed {
         control::control(s, gyro_f, accel_f, dt, reset_dynamics, fx);
     } else {
@@ -192,7 +193,7 @@ fn calibrate(s: &mut State, g: Vec3, a: Vec3, fx: &mut Out) {
 /// this long (µs), the estimate snaps to the accelerometer for
 /// `GROUND_RESET_US`. Any movement starts it over, so righting a crashed
 /// quad by hand or with turtle mode resets it again.
-const GROUND_RESET_QUIET_US: u64 = 250_000;
+pub(crate) const GROUND_RESET_QUIET_US: u64 = 250_000;
 const GROUND_RESET_US: u64 = 500_000;
 /// Still this long (µs), the ground reset has finished.
 pub(crate) const GROUND_SETTLED_US: u64 = GROUND_RESET_QUIET_US + GROUND_RESET_US;

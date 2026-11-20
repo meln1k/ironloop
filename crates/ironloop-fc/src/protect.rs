@@ -47,7 +47,7 @@ const LIFTOFF_CLIMB: f32 = 0.5;
 
 /// Tilted further than this (rad), a quad is over: no flight mode holds it
 /// there while it lies or is blocked.
-const TIPPED_OVER: f32 = 60f32.to_radians();
+pub(crate) const TIPPED_OVER: f32 = 60f32.to_radians();
 
 pub(crate) fn runaway_and_crash(s: &mut State, gyro: Vec3, accel: Vec3, throttle: f32, dt: f32, fx: &mut Out) {
     let cfg = s.cfg;

@@ -2,7 +2,7 @@
 //! on the ground, levels, holds, descends, lands softly, disarms, and gives
 //! control back when the link returns.
 
-use ironloop_fc::{DisarmReason, FailsafeStage};
+use ironloop_fc::{DisarmReason, FailsafeStage, GRAVITY};
 
 use super::req::*;
 use super::{Cx, Frame, Link, Property, Verdicts, disarm_reason, flight_fault};
@@ -25,7 +25,7 @@ pub static FAILSAFE_LEVELS: Property = Property {
 };
 pub static FAILSAFE_HOLDS: Property = Property {
     name: "failsafe_holds",
-    doc: "[flight] In the failsafe hold the quad neither climbs nor sinks faster than 3 m/s² of acceleration.",
+    doc: "[flight] In the failsafe hold the thrust neither climbs nor sinks the quad faster than 3 m/s² of acceleration (drag aside).",
 };
 pub static FAILSAFE_DESCENDS: Property = Property {
     name: "failsafe_descends",
@@ -44,14 +44,18 @@ pub static LINK_RECOVERS: Property = Property {
     doc: "Armed in failsafe, with the link back without a gap for 1 s and the switch on, failsafe ends.",
 };
 
-/// The vertical-acceleration probe over the failsafe hold's second half.
+/// The probe of the failsafe hold's vertical acceleration from thrust and
+/// gravity over its second half. Drag is left out: a hold that starts in a
+/// fast fall or climb slows down at any throttle (a fall at 8 m/s by about
+/// 5 m/s²), and what the hold sets is the thrust.
 #[derive(Clone, Copy, Debug, Default)]
 enum HoldProbe {
     /// Not yet 0.3 s into the hold.
     #[default]
     Waiting,
-    /// Vertical speed when the measurement started.
-    Started(f32),
+    /// When the measurement started, the last step, and the vertical speed
+    /// thrust and gravity have added since (m/s, up positive).
+    Started { since: u64, last: u64, dv: f32 },
     /// Measured once this hold.
     Done,
 }
@@ -132,17 +136,20 @@ impl Failsafe {
             // The hold flies at the learned hover throttle: measure the
             // vertical acceleration over its second half.
             let into = self.failsafe_since.map_or(0, |s| t - s);
+            let thrust: f32 = (0..4).map(|i| world.thrust(i)).sum();
+            let lift = thrust * libm::cosf(cx.true_tilt) / world.frame.mass - GRAVITY;
             self.hold = match self.hold {
                 _ if into < 300_000 => HoldProbe::Waiting,
-                HoldProbe::Waiting => HoldProbe::Started(world.body.vel.z),
-                HoldProbe::Started(vz0) if into >= 900_000 && alt > 1.0 && flyable_now => {
+                HoldProbe::Waiting => HoldProbe::Started { since: t, last: t, dv: 0.0 },
+                HoldProbe::Started { since, dv, .. } if into >= 900_000 && alt > 1.0 && flyable_now => {
                     v.live(&FAILSAFE_HOLDS);
-                    let a = (world.body.vel.z - vz0) / (into as f32 * 1e-6 - 0.3);
+                    let a = dv / ((t - since) as f32 * 1e-6);
                     if a.abs() > REQ_HOLD_ACCEL {
-                        v.fail(t, &FAILSAFE_HOLDS, format!("vertical acceleration {a:.1} m/s2 in the hold"));
+                        v.fail(t, &FAILSAFE_HOLDS, format!("vertical acceleration {a:.1} m/s2 from thrust in the hold"));
                     }
                     HoldProbe::Done
                 }
+                HoldProbe::Started { since, last, dv } => HoldProbe::Started { since, last: t, dv: dv + lift * (t - last) as f32 * 1e-6 },
                 probe => probe,
             };
         }

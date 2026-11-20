@@ -4,6 +4,10 @@
 use crate::control::sag_ratio;
 use crate::{DisarmReason, Effect, FailsafeStage, GRAVITY, Notice, Out, State, THROTTLE_LOW, disarm};
 
+/// The hold corrects the learned hover throttle only if the throttle at
+/// link loss was within this fraction of it.
+const HOLD_NEAR_HOVER: f32 = 0.15;
+
 /// Throttle the failsafe flies at (sticks centered, self-leveling), or
 /// `None` while the pilot flies. Runs on every control step.
 pub(crate) fn throttle(s: &mut State, dt: f32) -> Option<f32> {
@@ -41,7 +45,11 @@ pub(crate) fn throttle(s: &mut State, dt: f32) -> Option<f32> {
             if s.landing_trim == 0.0 {
                 s.landing_trim_vz = s.flight.vz_est;
             }
-            s.landing_trim = if s.flight.vz_est < 0.25 || unmoved(s) {
+            // A descent speeding up is sinking whatever the estimate reads:
+            // after a long fall, or a re-arm in the air, it can read a climb
+            // of several m/s while the quad drops.
+            let speeding_up = s.landing_accel > 0.6 && s.landing_accel < f32::MAX;
+            s.landing_trim = if (s.flight.vz_est < 0.25 && !speeding_up) || unmoved(s) {
                 (s.landing_trim + 0.25 * dt).min(0.35)
             } else {
                 (s.landing_trim - 2.0 * dt).max(0.0)
@@ -97,8 +105,14 @@ pub(crate) fn advance(s: &mut State, fx: &mut Out) {
             } else {
                 // The hold ran at the learned hover throttle: an upward
                 // acceleration a in its second half means thrust is a/g too
-                // high, so throttle is about a/2g too high.
-                if let Some(mark) = s.hold_vz_mark {
+                // high, so throttle is about a/2g too high. Only if the
+                // pilot was flying near hover when the link went: otherwise
+                // the quad is still climbing or falling (a flip, a punch, a
+                // re-arm in a fall), and drag slows that whatever the
+                // throttle (a fall from 8 m/s by 5 m/s²), which reads as a
+                // thrust error.
+                let near_hover = (s.throttle_at_loss * sag_ratio(s) / s.hover_throttle - 1.0).abs() < HOLD_NEAR_HOVER;
+                if let Some(mark) = s.hold_vz_mark.filter(|_| near_hover) {
                     let span = now.saturating_sub(s.failsafe_since_us + 500_000).max(100_000) as f32 * 1e-6;
                     let down_accel = (s.flight.vz_est - mark) / span;
                     s.hover_throttle *= (1.0 + down_accel / (2.0 * GRAVITY)).clamp(0.85, 1.15);

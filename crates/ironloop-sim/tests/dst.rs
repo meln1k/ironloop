@@ -82,9 +82,24 @@ fn generated_scenarios_hold_every_property_and_replay_identically() {
 /// flipped) tips onto its side on takeoff and rolls there with the
 /// throttle up; its attitude estimate tumbles and the frame follows every
 /// demand as the gyro reads it, so only the ground's side load shows it.
+/// Seeds 13490 and 72955 lose the link in a fall after an inverted hang and
+/// in a climb. The hold took the drag slowing that down for a thrust error
+/// and set the hover throttle 15% low or 6% high: 13490 touched down at
+/// 3.6 m/s (3.1 m/s also when a descent speeding up did not count as
+/// sinking with the estimate reading a climb), and 72955 never descended.
+/// Seeds 44384 and 43872 lose the link after a long steady descent, which
+/// the leaky speed estimate reads as level, so hover learning pulled the
+/// hover throttle 8% low within seconds; 44384 touched down at 2.6 m/s and
+/// 43872 sat armed on the ground.
+/// Seed 6763 is re-armed while falling at 6 m/s and loses the link 0.3 s
+/// later. The speed estimate restarted at zero on arming and read a 5.6 m/s
+/// climb for the whole landing, which touched down at 4.7 m/s.
+/// Seed 77121 crashes with a dead motor, tumbles disarmed, and is re-armed
+/// on its back; a speed estimate carried over from the tumble once read as a
+/// fall, so crash detection never took it for rolled over.
 #[test]
 fn regression_seeds_hold_every_property() {
-    for seed in [1531, 822, 3007, 6875, 3934, 838, 88, 445, 519, 70, 688, 257, 209, 741, 1360, 1979, 290248, 445159, 34731, 315882, 4285, 6018, 42067, 7861, 73501, 45798, 49056, 78109, 36096, 2882, 70904] {
+    for seed in [1531, 822, 3007, 6875, 3934, 838, 88, 445, 519, 70, 688, 257, 209, 741, 1360, 1979, 290248, 445159, 34731, 315882, 4285, 6018, 42067, 7861, 73501, 45798, 49056, 78109, 36096, 2882, 70904, 13490, 72955, 44384, 43872, 6763, 77121] {
         let r = run_seed(seed);
         assert!(r.violations.is_empty(), "seed {seed} [{}]: {:?}", r.name, r.violations);
     }

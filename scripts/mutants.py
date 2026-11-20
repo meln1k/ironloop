@@ -142,6 +142,11 @@ MUTANTS = {
     "battery warning at 3.75 V": [(CFG, "vbat_warn: 3.45,", "vbat_warn: 3.75,")],
     "motor fault below 95% of expected eRPM": [(CFG, "motor_fault_frac: 0.3,", "motor_fault_frac: 0.95,")],
     "failsafe needs 3 s of link to recover": [(CFG, "failsafe_recovery_us: 300_000,", "failsafe_recovery_us: 3_000_000,")],
+    "failsafe hold corrects hover in a climb or fall": [(FAILSAFE, ".filter(|_| near_hover)", ".filter(|_| near_hover || true)")],
+    "failsafe trim ignores a descent speeding up": [(FAILSAFE, "(s.flight.vz_est < 0.25 && !speeding_up)", "s.flight.vz_est < 0.25")],
+    "hover learning stays fast": [(CONTROL, "let tau = if s.hover_learned_us < HOVER_SETTLE_US { 1.5 } else { HOVER_SLOW_TAU };", "let tau = 1.5;")],
+    "vertical speed integrated through a disarmed tumble": [(CONTROL, "if !s.armed && (still || s.attitude.tilt() > crate::protect::TIPPED_OVER) {", "if !s.armed && still {")],
+    "vertical speed restarts at zero on arming": [(LIB, "s.flight = Flight { vz_est: s.flight.vz_est, ..Flight::default() };", "s.flight = Flight::default();")],
     "failsafe hold at 130% hover": [(FAILSAFE, "FailsafeStage::Hold => Some(s.hover_throttle / sag_ratio(s)),", "FailsafeStage::Hold => Some(s.hover_throttle * 1.3 / sag_ratio(s)),")],
     # Control quality.
     "rate curve 40% low": [(CONTROL, "let dps = (200.0 * r.rc_rate * x * super_factor)", "let dps = (120.0 * r.rc_rate * x * super_factor)")],

@@ -40,6 +40,11 @@ pub(crate) fn dshot(frac: f32) -> u16 {
 /// keeps up, less below about 3.1 V where it is capped at 1.25x (a
 /// sagging pack then needs more throttle to hover), more above the
 /// reference (a fresh pack needs less).
+/// Level flight (µs) after which hover learning slows down, and its slow
+/// time constant (s).
+const HOVER_SETTLE_US: u64 = 3_000_000;
+const HOVER_SLOW_TAU: f32 = 20.0;
+
 pub(crate) fn sag_ratio(s: &State) -> f32 {
     let cfg = &s.cfg;
     match s.battery_volts {
@@ -48,8 +53,22 @@ pub(crate) fn sag_ratio(s: &State) -> f32 {
     }
 }
 
-pub(crate) fn control(s: &mut State, gyro: Vec3, accel: Vec3, dt: f32, reset: bool, fx: &mut Out) {
-    let cfg = s.cfg;
+/// Vertical speed from the accelerometer, on every IMU sample once the gyro
+/// is calibrated, armed or not: a pilot who re-arms a falling quad must not
+/// start the estimate at zero.
+pub(crate) fn vertical_speed(s: &mut State, accel: Vec3, dt: f32) {
+    if !s.cal.done {
+        return;
+    }
+    // Disarmed, only an upright fall is worth carrying into a re-arm:
+    // a quad still (as for the ground reset of the attitude) is not moving,
+    // and one tumbling after a crash has an attitude estimate too far off
+    // to integrate.
+    let still = s.still_since_us.is_some_and(|t| s.now_us.saturating_sub(t) >= crate::imu::GROUND_RESET_QUIET_US);
+    if !s.armed && (still || s.attitude.tilt() > crate::protect::TIPPED_OVER) {
+        s.flight.vz_est = 0.0;
+        return;
+    }
     // Vertical motion from the accelerometer, against what it read for 1 g
     // on the ground. In normal flight the integral leaks, forgetting steady
     // motion over a few seconds (without a barometer a steady climb looks
@@ -63,6 +82,10 @@ pub(crate) fn control(s: &mut State, gyro: Vec3, accel: Vec3, dt: f32, reset: bo
     let down_accel = s.attitude.rotate(accel).z + s.cal.accel_1g;
     let leak = if s.failsafe == FailsafeStage::None { s.flight.vz_est / 4.0 } else { 0.0 };
     s.flight.vz_est += (down_accel - leak) * dt;
+}
+
+pub(crate) fn control(s: &mut State, gyro: Vec3, accel: Vec3, dt: f32, reset: bool, fx: &mut Out) {
+    let cfg = s.cfg;
     let (roll, pitch, yaw, throttle) = match failsafe::throttle(s, dt) {
         None => (s.rc.input.roll, s.rc.input.pitch, s.rc.input.yaw, s.rc.input.throttle),
         Some(throttle) => (0.0, 0.0, 0.0, throttle),
@@ -84,7 +107,13 @@ pub(crate) fn control(s: &mut State, gyro: Vec3, accel: Vec3, dt: f32, reset: bo
     let at_ref = sag_ratio(s);
     if s.failsafe == FailsafeStage::None && s.flight.airmode_active && level_flight && tilt < 0.5 && (0.1..0.95).contains(&throttle) {
         let level = throttle * at_ref * libm::sqrtf(libm::cosf(tilt));
-        s.hover_throttle += (level - s.hover_throttle) * (dt / 1.5);
+        // Fast from the guess, then slowly: in reference-voltage terms
+        // the hover throttle hardly changes in a flight, while a steady
+        // climb or descent, which the leaky estimate soon reads as level,
+        // would pull it far off within seconds.
+        let tau = if s.hover_learned_us < HOVER_SETTLE_US { 1.5 } else { HOVER_SLOW_TAU };
+        s.hover_learned_us = s.hover_learned_us.saturating_add((dt * 1e6) as u64);
+        s.hover_throttle += (level - s.hover_throttle) * (dt / tau);
     }
 
     let yaw_rate = rate_curve(&cfg.rates[2], yaw);

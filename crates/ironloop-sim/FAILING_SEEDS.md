@@ -119,7 +119,7 @@ The cases below are the rare ones worth a look. "Looks like" is a reading of the
 
 ### Seed 61440: the failsafe landing climbs (`no_flyaway`)
 
-Status: open.
+Status: known limit, the failsafe climb bias (README, Known limits); not changed by the failsafe fixes below. The quad had less than 3 s of level flight before a 13 s climb at a steady 3.7 m/s at constant throttle. The leaky speed estimate reads that as level after a few seconds, so hover learning took the climbing throttle for hover (0.506 → 0.611). The hold flies at about the same throttle the quad was climbing at, so it sees no acceleration either, and the landing's 96% of that still climbs. An accelerometer cannot tell a steady climb at constant throttle from a hover. Seed 72534 is the same case.
 
 The quad is climbing at about 3.7 m/s toward a 45 m hover when the link drops at 16.4 s. Through `Failsafe(Landing)` from 17.4 s to 24.6 s it keeps climbing at about 2.3 m/s, from 45 m to 62 m, with the throttle swinging between 0.58 and 0.70, until the link returns. Looks like the landing trim and brake keep cycling instead of taking throttle off while the quad is already climbing hard at link loss. Possibly the clearest case of the `failsafe_descends` failures.
 
@@ -160,19 +160,19 @@ Status: open. From the sweep of seeds 0–199,999 with the fixes above, on f4312
 
 ### Seed 13490: the failsafe hold drops, touchdown not detected (`failsafe_holds`, `failsafe_lands_softly`, `failsafe_disarms_on_touchdown`)
 
-Status: open.
+Status: fixed (regression seed). There were three causes. The hold does not drop: the quad starts it in an 8.4 m/s fall from the inverted hang, and drag slows that fall at 5 m/s² whatever the throttle. The hold flew at 1.15 g of thrust, and the requirement is about thrust, so `failsafe_holds` now judges the vertical acceleration from thrust and gravity and leaves drag out (an oracle bug, behind all 19 `failsafe_holds` failures in seeds 0–99,999). The firmware made the same mistake: its hold takes the speed change it measures for a thrust error, read the drag as 15% too much hover throttle, and the landing then flew at about 83% of the real hover thrust. The hold now corrects the hover throttle only if the throttle at link loss was within 15% of it. Then, with the estimate reading a climb after the fall, the landing trim kept taking throttle off a descent that was speeding up; such a descent now counts as sinking. The missed touchdown followed from the 3.6 m/s hit: clipped at 16 g, the accelerometer lost most of the stop, and the estimate read a 2.4 m/s climb on the ground.
 
 The link drops at 35.3 s right after an inverted hang. In the hold the quad accelerates down at 5.1 m/s², touches down at 3.6 m/s, and sits armed on the ground for over 2 s until the link recovers. Looks like the hover throttle is far off after the maneuver, and touchdown detection misses the hard landing.
 
 ### Seed 6763: hardest failsafe touchdown, 4.7 m/s (`failsafe_lands_softly`)
 
-Status: open.
+Status: fixed (regression seed). Arming started a fresh `Flight`, which zeroed the vertical speed estimate while the quad fell at 6 m/s, so the landing read a 5.6 m/s climb throughout and never braked. The estimate is now integrated disarmed too (once the gyro is calibrated) and kept across arming.
 
 A stuck IMU disarms the quad at 35.9 s; the pilot re-arms in the air at 36.7 s, the link drops 0.3 s later, and the failsafe lands at 4.7 m/s. The failsafe starts with little learned hover throttle after a mid-air re-arm.
 
 ### Seed 13292: drifts 120 m on a flapping link (`no_flyaway`)
 
-Status: open.
+Status: passes after the failsafe fixes (the landings come down sooner, so it drifts less); not changed for itself. Without position sensing, the failsafe drifts with the wind for as long as it is in the air, and each return of the link restarts the hold. Seed 65921 (wind 4) still drifts 120 m through a failsafe. Whether `no_flyaway` should excuse wind drift in failsafe is open.
 
 Wind 4, a bent prop, a critical pack. From 72.8 s to about 85 s the link drops and returns six times, 1–2 s apart, each time `Failsafe(Hold)` → `Landing` → `Recovered`; the quad ends on the ground 120 m from home. Possibly expected (no position hold, strong wind), but each recovery restarts the hold.
 
