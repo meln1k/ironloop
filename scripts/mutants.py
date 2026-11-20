@@ -82,7 +82,8 @@ MUTANTS = {
     "IMU Cw90/Cw270 swapped in align()": [(IMU, "ImuAlignment::Cw90 => Vec3::new(-v.y, v.x, v.z),", "ImuAlignment::Cw90 => Vec3::new(v.y, -v.x, v.z),")],
     "gyro calibration accepts motion": [(IMU, "if spread > s.cfg.gyro_cal_motion * 2.0 {", "if false {")],
     "estimator trusts accel during acceleration": [(IMU, "let weight = (1.0 - dev / band).clamp(0.0, 1.0);", "let weight = 1.0f32;")],
-    "estimator bias integral sign flipped": [(IMU, "err * (0.3 * weight * dt)", "err * (-0.3 * weight * dt)")],
+    "estimator bias integral sign flipped": [(IMU, "err * (0.15 * weight * dt)", "err * (-0.15 * weight * dt)")],
+    "estimator learns bias from a push (integral gain 0.3)": [(IMU, "err * (0.15 * weight * dt)", "err * (0.3 * weight * dt)")],
     # Control.
     "yaw mixer sign inverted (props-in)": [(CONTROL, MIX_OK, MIX_YAW_INVERTED)],
     "D-term sign flipped": [(CONTROL, "+ integral[i] - k.d * d[i]", "+ integral[i] + k.d * d[i]")],

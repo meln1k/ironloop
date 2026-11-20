@@ -236,8 +236,13 @@ fn estimate_attitude(s: &mut State, gyro: Vec3, accel: Vec3, dt: f32) {
         let recovering = s.now_us < s.recovering_until_us && dev < 0.1 && gyro.norm() < 1.0 && err.norm() > 0.17;
         let kp = if recovering { kp.max(6.0) } else { kp };
         if s.cal.done && !fast && !recovering {
-            s.est_integral += err * (0.3 * weight * dt);
-            // Residual gyro bias from warm-up drift after calibration.
+            // Residual gyro bias from warm-up drift after calibration, which
+            // builds over a minute. A push or a cruise reads level-looking
+            // thrust near 1 g for a second or two; learning faster than the
+            // drift took that error for bias (0.07 rad/s after one push
+            // where the real residual was 0.003, seed 6018), which then kept
+            // turning the estimate after the push.
+            s.est_integral += err * (0.15 * weight * dt);
             let lim = 0.1;
             s.est_integral = Vec3::new(
                 s.est_integral.x.clamp(-lim, lim),

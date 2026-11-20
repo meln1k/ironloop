@@ -56,12 +56,15 @@ fn generated_scenarios_hold_every_property_and_replay_identically() {
 /// it flies by was still excused.
 /// Seed 4285 loses sync on its weakened motor at idle on a sagging pack,
 /// which `no_esc_stall` once counted as a sound motor's stall.
+/// Seed 6018 cruises at 30-40 degrees for two seconds and then hovers;
+/// the estimator once learned the push's thrust reading as 0.07 rad/s of
+/// gyro bias and kept turning the estimate in the hover, 15 degrees off.
 /// Seed 42067 desyncs a sound motor for 190 ms on a sagging pack; the
 /// simulated ESC once kept running through the fault and, finding the
 /// motor stopped when it cleared, counted a stall of its own.
 #[test]
 fn regression_seeds_hold_every_property() {
-    for seed in [1531, 822, 3007, 6875, 3934, 838, 88, 445, 519, 70, 688, 257, 209, 741, 1360, 1979, 290248, 445159, 34731, 315882, 4285, 42067] {
+    for seed in [1531, 822, 3007, 6875, 3934, 838, 88, 445, 519, 70, 688, 257, 209, 741, 1360, 1979, 290248, 445159, 34731, 315882, 4285, 6018, 42067] {
         let r = run_seed(seed);
         assert!(r.violations.is_empty(), "seed {seed} [{}]: {:?}", r.name, r.violations);
     }
