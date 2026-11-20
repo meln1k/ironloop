@@ -13,6 +13,7 @@
 
 pub mod config;
 mod control;
+mod dyn_notch;
 mod failsafe;
 mod health;
 mod imu;
@@ -268,6 +269,8 @@ pub struct State {
     spike_run: u8,
     gyro_lpf: Lpf,
     rpm_filter: rpm::RpmFilter,
+    /// Notches the strongest vibration tone while the RPM filter is off.
+    dyn_notch: dyn_notch::DynNotch,
     /// When each motor's eRPM last arrived; the RPM filter drops a motor
     /// whose telemetry goes stale.
     rpm_at_us: [Option<u64>; 4],
@@ -353,6 +356,7 @@ impl State {
             spike_run: 0,
             gyro_lpf: Lpf::default(),
             rpm_filter: rpm::RpmFilter::default(),
+            dyn_notch: dyn_notch::DynNotch::default(),
             rpm_at_us: [None; 4],
             imu_period: 0.0,
             dterm_lpf: Lpf::default(),

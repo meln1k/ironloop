@@ -51,6 +51,10 @@ pub struct Config {
     pub rpm_filter_harmonics: u8,
     pub rpm_filter_q: f32,
     pub rpm_filter_min_hz: f32,
+    /// Q of the dynamic notch, which takes the strongest vibration tone out
+    /// of the gyro while the RPM filter is off (no eRPM from some motor);
+    /// 0 turns it off. It notches nothing below `rpm_filter_min_hz`.
+    pub dyn_notch_q: f32,
     /// Motor magnet pole pairs (eRPM / pole pairs = RPM).
     pub motor_pole_pairs: f32,
     /// Largest believable change between consecutive gyro samples (rad/s).
@@ -152,6 +156,7 @@ impl Default for Config {
             rpm_filter_harmonics: 3,
             rpm_filter_q: 8.0,
             rpm_filter_min_hz: 100.0,
+            dyn_notch_q: 3.0,
             // SE0702: 12 poles.
             motor_pole_pairs: 6.0,
             gyro_spike: 10.0,

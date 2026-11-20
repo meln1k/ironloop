@@ -14,7 +14,7 @@ pub const MAX_HARMONICS: usize = 3;
 /// A second-order notch (RBJ cookbook) on all three axes, direct form II
 /// transposed.
 #[derive(Clone, Copy, Debug, PartialEq)]
-struct Notch {
+pub(crate) struct Notch {
     /// b0, b1, b2, a1, a2 (a0 = 1); `None` passes the input through.
     c: Option<[f32; 5]>,
     z1: Vec3,
@@ -22,14 +22,14 @@ struct Notch {
 }
 
 impl Notch {
-    const OFF: Notch = Notch { c: None, z1: Vec3::ZERO, z2: Vec3::ZERO };
+    pub(crate) const OFF: Notch = Notch { c: None, z1: Vec3::ZERO, z2: Vec3::ZERO };
 
     /// `input` is the latest gyro sample: a notch switching on starts as if
     /// it had been passing it all along, not from zero (which would kick the
     /// output by the whole gyro rate).
     /// `(s, c)` are the sine and cosine of the notch frequency in radians
     /// per sample, 0..pi.
-    fn tune(&mut self, (s, c): (f32, f32), q: f32, input: Vec3) {
+    pub(crate) fn tune(&mut self, (s, c): (f32, f32), q: f32, input: Vec3) {
         let alpha = s / (2.0 * q);
         let a0 = 1.0 + alpha;
         let was_off = self.c.is_none();
@@ -39,7 +39,7 @@ impl Notch {
         }
     }
 
-    fn apply(&mut self, x: Vec3) -> Vec3 {
+    pub(crate) fn apply(&mut self, x: Vec3) -> Vec3 {
         let Some([b0, b1, b2, a1, a2]) = self.c else { return x };
         let y = x * b0 + self.z1;
         self.z1 = x * b1 - y * a1 + self.z2;
@@ -48,7 +48,7 @@ impl Notch {
     }
 
     /// Steady state for a constant input `x` (the notch passes DC).
-    fn reset(&mut self, x: Vec3) {
+    pub(crate) fn reset(&mut self, x: Vec3) {
         if let Some([_, b1, b2, a1, a2]) = self.c {
             self.z2 = x * (b2 - a2);
             self.z1 = x * (b1 - a1) + self.z2;
@@ -60,7 +60,7 @@ impl Notch {
 /// Cortex-M4's FPU has no double precision, and `libm`'s `sinf` and `cosf`
 /// work in `f64`, so each call there is a few hundred emulated operations.
 /// The error here is below 1e-6.
-fn sin_cos(x: f32) -> (f32, f32) {
+pub(crate) fn sin_cos(x: f32) -> (f32, f32) {
     // sin x = cos y and cos x = -sin y for y = x - pi/2 in -pi/2..=pi/2,
     // where the Taylor series to y^12 converges well within f32 precision.
     let y = x - core::f32::consts::FRAC_PI_2;

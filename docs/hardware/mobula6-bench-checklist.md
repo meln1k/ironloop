@@ -31,6 +31,7 @@ Arming blocker bits in `blk`: 0x01 calibrating, 0x02 throttle, 0x04 RC link, 0x0
 
 - [ ] The longest `step` (second number of `cyc`) stays well under 30,000 cycles, the BMI270's 312 µs sample period at 96 MHz: idle, while moving the sticks, and through arming and disarming.
 - [ ] Check it again with eRPM coming in and motors spinning, since the RPM filter runs 12 notches per sample.
+- [ ] Check it with `rpm_filter_harmonics = 0` and motors spinning too: the dynamic notch then updates 28 DFT bins on two axes per sample.
 - [ ] Dead data-ready line: with PA1 disconnected or held low, `imu` stops growing, `blk` shows 0x08, and the quad refuses to arm. If PA1 is disconnected while armed, the motors stop within about 20 ms.
 
 ## 4. Battery

@@ -185,9 +185,13 @@ Seeds 30000-129999 had one more, 42067, on a sound motor: a 190 ms `MotorDesync`
 
 ### `motors_quiet` (491 in 1M): a bent prop without eRPM
 
-Status: open, needs a decision (a missing filter, not a bug).
+Status: fixed for bent props in the firmware (a dynamic notch); 7861 is a regression seed. The `rc-glitch` part is open.
 
 16 of the 17 failures in seeds 0-29999 have both `bent-prop` and `no-telemetry`, and all sit just over the limit (7.5-8.8% RMS). Without eRPM there is no RPM filter, and the 150 Hz gyro low-pass lets the bent prop's shaft-rate tone through to the motors. With telemetry forced on, the same seeds jitter 0.8-1.8%. Betaflight covers this case with its dynamic (FFT) notch. Options: add a dynamic notch, lower the gyro low-pass when eRPM is missing (more lag), or accept it for bent props without bidirectional DShot. The 17th, 7536, is `rc-glitch` corrupting 25% of frames in a 45 m hover (throttle jumps to 100%), the same corrupted-frame issue as the stick scripts above.
+
+The firmware now has a dynamic notch (`crates/ironloop-fc/src/dyn_notch.rs`), on while the RPM filter is off: a 64-sample sliding DFT of roll and pitch, the strongest bin from 100 Hz to 0.45 of the sample rate if it stands 6 times over the mean, placed between bins from the neighbours' complex values, and a Q 3 notch there. Of the 72 seeds that failed `motors_quiet` in seeds 0-29999 and 30000-129999, 50 pass, including every one with `bent-prop` and `no-telemetry`. All 21 still failing have `rc-glitch`: corrupted frames that pass the CRC jump the sticks inside the steady window, so the motors follow the pilot input, not vibration. Whether the monitor should excuse those frames here, as it now does for the stick scripts, or the firmware should smooth the RC input, is open.
+
+On seeds 30000-129999 (against the tree before it): `motors_quiet` 57 -> 21 (37 fixed, 43979 new), every property's total 568 -> 538, and no control-quality property fails. The other counts move by a few seeds each way (66 new failures, 60 fixed): `pilot_can_arm` 13 -> 16, `failsafe_levels` 6 -> 9, `failsafe_disarms_on_touchdown` 2 -> 5, `runaway_stops` 2 -> 5. The ones traced are trajectories that change near a fault, not the notch misbehaving: 66780 and 51797 crash or trip a runaway the same way with and without it, then land level instead of on their side after the disarmed tumble, so the pilot arms again (66780 0.3 s before the estimate snaps level; 51797 a spin-reversed build pinned on the ground at full throttle without turning, which the runaway check does not see).
 
 ### `estimate_tracks` (3,246 in 1M): bias integral wind-up, and the post-saturation pull
 

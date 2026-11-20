@@ -41,6 +41,7 @@ SCRIPT = "crates/ironloop-sim/src/monitor/script.rs"
 MON_PROTECT = "crates/ironloop-sim/src/monitor/protect.rs"
 SIM = "crates/ironloop-sim/src/sim.rs"
 PHYSICS = "crates/ironloop-sim/src/physics.rs"
+CONFIG = "crates/ironloop-fc/src/config.rs"
 
 MIX_OK = """    [-1.0, -1.0, 1.0],
     [-1.0, 1.0, -1.0],
@@ -84,6 +85,7 @@ MUTANTS = {
     "estimator trusts accel during acceleration": [(IMU, "let weight = (1.0 - dev / band).clamp(0.0, 1.0);", "let weight = 1.0f32;")],
     "estimator bias integral sign flipped": [(IMU, "err * (0.15 * weight * dt)", "err * (-0.15 * weight * dt)")],
     "estimator learns bias from a push (integral gain 0.3)": [(IMU, "err * (0.15 * weight * dt)", "err * (0.3 * weight * dt)")],
+    "dynamic notch off": [(CONFIG, "dyn_notch_q: 3.0,", "dyn_notch_q: 0.0,")],
     # Control.
     "yaw mixer sign inverted (props-in)": [(CONTROL, MIX_OK, MIX_YAW_INVERTED)],
     "D-term sign flipped": [(CONTROL, "+ integral[i] - k.d * d[i]", "+ integral[i] + k.d * d[i]")],

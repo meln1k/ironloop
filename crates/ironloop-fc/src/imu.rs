@@ -2,7 +2,7 @@
 //! estimate. Drives the controller when armed.
 
 use crate::math::{Quat, Vec3};
-use crate::{Effect, GRAVITY, ImuAlignment, Notice, Out, State, control, rpm};
+use crate::{Effect, GRAVITY, ImuAlignment, Notice, Out, State, control, dyn_notch, rpm};
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct GyroCal {
@@ -115,6 +115,7 @@ pub(crate) fn on_imu(s: &mut State, gyro: [f32; 3], accel: [f32; 3], fx: &mut Ou
     let g = g - s.cal.bias;
     let gyro_f = if reset_dynamics {
         s.rpm_filter.reset(g);
+        s.dyn_notch.reset(g);
         s.gyro_lpf.y = g;
         g
     } else {
@@ -129,6 +130,8 @@ pub(crate) fn on_imu(s: &mut State, gyro: [f32; 3], accel: [f32; 3], fx: &mut Ou
         let rpm_on = s.cfg.rpm_filter_harmonics > 0 && s.rpm_at_us.iter().all(Option::is_some);
         let hz = if rpm_on { s.cfg.gyro_lpf_rpm_hz } else { s.cfg.gyro_lpf_hz };
         let notched = s.rpm_filter.apply(g);
+        let min_bin = s.cfg.rpm_filter_min_hz * dyn_notch::N as f32 * s.imu_period;
+        let notched = s.dyn_notch.apply(notched, !rpm_on && s.cfg.dyn_notch_q > 0.0, s.cfg.dyn_notch_q, min_bin);
         s.gyro_lpf.update(notched, hz, dt)
     };
     let accel_f = if reset_dynamics {
