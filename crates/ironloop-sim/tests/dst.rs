@@ -45,9 +45,12 @@ fn generated_scenarios_hold_every_property_and_replay_identically() {
 /// down at 2.5-2.8 m/s: each descent probe of the trim left the descent
 /// faster with nothing above hover to slow it, and 1360's sagging pack,
 /// below where sag compensation is capped, could not hold even that.
+/// Seed 290248 stalls the control loop as the IMU drops out, so the last
+/// sample waits behind events queued later; stepping the queue first once
+/// set time back 10 ms and reported `ClockWentBackwards`.
 #[test]
 fn regression_seeds_hold_every_property() {
-    for seed in [1531, 822, 3007, 6875, 3934, 838, 88, 445, 519, 70, 688, 257, 209, 741, 1360, 1979] {
+    for seed in [1531, 822, 3007, 6875, 3934, 838, 88, 445, 519, 70, 688, 257, 209, 741, 1360, 1979, 290248] {
         let r = run_seed(seed);
         assert!(r.violations.is_empty(), "seed {seed} [{}]: {:?}", r.name, r.violations);
     }

@@ -37,6 +37,7 @@ CONTROL = "crates/ironloop-fc/src/control.rs"
 FAILSAFE = "crates/ironloop-fc/src/failsafe.rs"
 PROTECT = "crates/ironloop-fc/src/protect.rs"
 MON = "crates/ironloop-sim/src/monitor/mod.rs"
+SIM = "crates/ironloop-sim/src/sim.rs"
 
 MIX_OK = """    [-1.0, -1.0, 1.0],
     [-1.0, 1.0, -1.0],
@@ -145,6 +146,9 @@ MUTANTS = {
         "excuses(sc, t, |e| e == Excuse::Flight)",
         "excuses(sc, t, |e| e != Excuse::LinkOrWeather) && excuses(sc, t, |e| e != Excuse::Nothing)",
     )],
+    # The checker or the board model failing sound firmware; the regression
+    # seeds catch each.
+    "board: queued events stepped before an older IMU sample": [(SIM, "(Some((imu, _)), Some((queued, _))) => imu < queued,", "(Some((imu, _)), Some((queued, _))) => imu < queued && false,")],
 }
 
 

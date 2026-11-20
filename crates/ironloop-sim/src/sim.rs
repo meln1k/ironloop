@@ -624,7 +624,8 @@ impl Sim {
     }
 
     /// Runs the control task until it is busy or has nothing to do. Like
-    /// the board's loop, it takes queued events first, then the newest
+    /// the board's loop, it takes queued events first, unless the newest
+    /// data-ready is older than the first of them, then the newest
     /// data-ready (reading it over SPI, then stepping it), then the tick,
     /// which it stamps when it gets to it.
     fn run_task(&mut self) {
@@ -637,8 +638,16 @@ impl Sim {
             self.busy(end);
             return;
         }
+        let drdy_first = match (&self.task.drdy, self.task.queue.front()) {
+            (Some((imu, _)), Some((queued, _))) => imu < queued,
+            _ => false,
+        };
         let (stamp, kind, read_us) = if let Some((stamp, kind)) = self.task.reading.take() {
             (stamp, kind, self.sc.imu.read_delay_us)
+        } else if let Some(sample) = self.task.drdy.take_if(|_| drdy_first) {
+            self.task.reading = Some(sample);
+            self.busy(t + self.sc.imu.read_delay_us);
+            return;
         } else if let Some((stamp, kind)) = self.task.queue.pop_front() {
             (stamp, kind, 0)
         } else if let Some(sample) = self.task.drdy.take() {

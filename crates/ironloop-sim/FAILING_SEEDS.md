@@ -125,9 +125,11 @@ The quad is climbing at about 3.7 m/s toward a 45 m hover when the link drops at
 
 ### Seed 290248: false `ClockWentBackwards`, then a disarm (`no_false_clock_alarm`)
 
-Status: open.
+Status: fixed in the board's control loop (`firmware/mobula6/src/control.rs`) and the simulator's model of it; regression seed.
 
 A 12.6 ms `FcStall` at 47.653 s overlaps an `ImuDropout` that starts 3.5 ms later. At 47.666 s, as the stall ends, the firmware reports `ClockWentBackwards` with no clock fault, and `Disarmed(ImuFailure)` follows 20 ms later. The only one in 1M seeds. Unchecked guess: events queued during the stall are stepped after one stamped later, so the firmware sees a jump back of over 1 ms. If so, either the board can do the same (a firmware bug) or the simulated task queue orders events differently from the board's.
+
+Cause: the last sample before the dropout was ready at 47.656253 s, during the stall. When the stall ended, the loop stepped the ESC telemetry queued during it (stamped up to 47.6655 s) first, as the board's loop does with its `EVENTS` queue, then that sample, 9.8 ms back. Normally a newer data-ready replaces the waiting one every sample, so the queue first is in order; with the IMU silent it is not. On the board, RC frames queued during a long step or stall would do the same. The loop now steps a waiting sample first when it is older than the queued event (`take_drdy_before`, atomic against EXTI1), and the simulator's task does the same. The `Disarmed(ImuFailure)` is right: the dropout lasts 38 ms, and it now comes 20 ms after the last real sample instead of 30.
 
 ### Seeds 49056 and 78109: armed upside down, never stopped (`arm_level`, `crash_stops`, `runaway_stops`)
 

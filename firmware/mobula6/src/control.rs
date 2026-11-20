@@ -140,24 +140,24 @@ pub async fn control_task(
         // A motor command held back by a frame still on the wire goes out
         // now; the next pass comes within a tick.
         motors.flush();
-        // Queued RC and battery events go first: they were stamped before
-        // anything the loop has not yet seen, so time stays in order even
-        // after a long step.
+        // Events are stepped oldest first, so time stays in order even
+        // after a long step. Queued RC and battery events usually are: the
+        // newest data-ready replaces older ones every sample. But a sample
+        // that is the last before the IMU stops (a dropout during a stall)
+        // can be older than events queued behind it, so it goes first.
         let event = match select3(EVENTS.receive(), DRDY.wait(), Timer::at(next_tick)).await {
-            Either3::First(event) => event,
-            Either3::Second(t_us) => {
-                let Some(imu) = imu.as_mut() else { continue };
-                match imu.sample().await {
-                    Ok((gyro, accel)) => {
-                        STATS.imu_samples.fetch_add(1, Relaxed);
-                        Event { t_us, kind: EventKind::Imu { gyro, accel } }
-                    }
-                    Err(_) => {
-                        STATS.imu_read_errors.fetch_add(1, Relaxed);
-                        continue;
+            Either3::First(event) => {
+                if let Some(t_us) = take_drdy_before(event.t_us) {
+                    if let Some(sample) = read_imu(&mut imu, t_us).await {
+                        run(&mut state, &sample, &mut motors, &mut led, &mut beeper);
                     }
                 }
+                event
             }
+            Either3::Second(t_us) => match read_imu(&mut imu, t_us).await {
+                Some(sample) => sample,
+                None => continue,
+            },
             Either3::Third(()) => {
                 let now = Instant::now();
                 next_tick += TICK;
@@ -183,6 +183,35 @@ pub async fn control_task(
             }
         };
         run(&mut state, &event, &mut motors, &mut led, &mut beeper);
+    }
+}
+
+/// Takes the data-ready stamp if a sample is waiting from before `t_us`;
+/// a newer one stays signaled for the next pass.
+fn take_drdy_before(t_us: u64) -> Option<u64> {
+    // EXTI1 cannot replace the stamp between the take and the put-back.
+    cortex_m::interrupt::free(|_| {
+        let t = DRDY.try_take()?;
+        if t < t_us {
+            Some(t)
+        } else {
+            DRDY.signal(t);
+            None
+        }
+    })
+}
+
+/// Reads the sample that became ready at `t_us`, as its event.
+async fn read_imu(imu: &mut Option<imu::Imu>, t_us: u64) -> Option<Event> {
+    match imu.as_mut()?.sample().await {
+        Ok((gyro, accel)) => {
+            STATS.imu_samples.fetch_add(1, Relaxed);
+            Some(Event { t_us, kind: EventKind::Imu { gyro, accel } })
+        }
+        Err(_) => {
+            STATS.imu_read_errors.fetch_add(1, Relaxed);
+            None
+        }
     }
 }
 
