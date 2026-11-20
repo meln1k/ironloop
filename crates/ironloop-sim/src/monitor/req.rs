@@ -89,7 +89,9 @@ pub const REQ_SETTLED_RMS: f32 = 0.4;
 /// script (a corrupted one) for this long after it (µs): one frame at full
 /// stick asks for more than the motors can give, which the first-order
 /// reference does not model, and the quad takes about this long to come
-/// back (seeds 48969, 136715, 143014, 445159, 34731, 271939).
+/// back (seeds 48969, 136715, 143014, 445159, 34731, 271939). Nor is
+/// `motors_quiet` judged on it: a corrupted frame in a hover jumps a stick
+/// or the throttle, and the motors follow it (seed 7536).
 pub const REQ_OFF_SCRIPT_RESPONSE_US: u64 = 100_000;
 /// Failsafe hold: thrust within 30% of weight (vertical acceleration m/s²).
 pub const REQ_HOLD_ACCEL: f32 = 3.0;

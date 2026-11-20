@@ -64,9 +64,11 @@ fn generated_scenarios_hold_every_property_and_replay_identically() {
 /// motor stopped when it cleared, counted a stall of its own.
 /// Seed 7861 hovers on a bent prop with no eRPM, so no RPM filter; its
 /// shaft-rate tone once passed the 150 Hz gyro low-pass into the motors.
+/// Seed 73501 hovers through corrupted RC frames that pass the CRC, which
+/// `motors_quiet` once scored as motor noise.
 #[test]
 fn regression_seeds_hold_every_property() {
-    for seed in [1531, 822, 3007, 6875, 3934, 838, 88, 445, 519, 70, 688, 257, 209, 741, 1360, 1979, 290248, 445159, 34731, 315882, 4285, 6018, 42067, 7861] {
+    for seed in [1531, 822, 3007, 6875, 3934, 838, 88, 445, 519, 70, 688, 257, 209, 741, 1360, 1979, 290248, 445159, 34731, 315882, 4285, 6018, 42067, 7861, 73501] {
         let r = run_seed(seed);
         assert!(r.violations.is_empty(), "seed {seed} [{}]: {:?}", r.name, r.violations);
     }

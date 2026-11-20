@@ -164,6 +164,7 @@ MUTANTS = {
         "let estimate_off = after.mode == FlightMode::Angle && cx.reconverging;",
         "let estimate_off = false;",
     )],
+    "monitor: motors_quiet judged on a corrupted RC frame": [("crates/ironloop-sim/src/monitor/flight.rs", "            && !cx.rc_corrupted\n", "")],
     "monitor: a weakened motor's stall counts": [(MON_PROTECT, "if stalls[i] > self.esc_stalls[i] && m.health == MotorHealth::Ok {", "if stalls[i] > self.esc_stalls[i] {")],
     "board: queued events stepped before an older IMU sample": [(SIM, "(Some((imu, _)), Some((queued, _))) => imu < queued,", "(Some((imu, _)), Some((queued, _))) => imu < queued && false,")],
     "sim: the ESC runs through a desync": [(PHYSICS, "if cmd <= 0.0 || !sound {", "if cmd <= 0.0 {")],

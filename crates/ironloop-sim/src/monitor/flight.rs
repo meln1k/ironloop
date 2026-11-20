@@ -188,6 +188,7 @@ impl Flight {
             && cx.flying
             && !cx.excused
             && !cx.wild
+            && !cx.rc_corrupted
             && after.failsafe == FailsafeStage::None
             && after.motors.iter().all(|&m| m > DSHOT_MIN + 60 && m < DSHOT_MAX - 60);
         if !judged {

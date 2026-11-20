@@ -87,6 +87,8 @@ pub struct Sim {
     rng_vib: Rng,
     /// A clock jump back the firmware's next step will see.
     clock_back_us: u64,
+    /// When the last RC frame corrupted in a way the CRC passes was sent.
+    rc_corrupted_us: Option<u64>,
     /// Manual control from the visualizer replaces the virtual pilot.
     pub manual: Option<Sticks>,
     pub sticks: Sticks,
@@ -150,6 +152,7 @@ impl Sim {
             tone_memo: [None; 4],
             rng_vib: Rng::fork(seed, "vib"),
             clock_back_us: 0,
+            rc_corrupted_us: None,
             manual: None,
             sticks: Sticks::default(),
             monitor: Monitor::default(),
@@ -567,6 +570,7 @@ impl Sim {
                     // alone; see the README).
                     let i = *self.rng_rc.pick(&[0usize, 1, 2, 3, 5]);
                     channels[i] = crsf_to_us(self.rng_rc.range_u64(0, 2048) as u16);
+                    self.rc_corrupted_us = Some(t);
                 }
             }
         }
@@ -715,7 +719,7 @@ impl Sim {
                 Effect::RebootToBootloader => self.rebooted_to_bootloader = true,
             }
         }
-        self.monitor.on_step(Step { t: self.t_us, event: &event, fx: &fx, before: &before, after: &status, world: &self.world, sc: &self.sc });
+        self.monitor.on_step(Step { t: self.t_us, event: &event, fx: &fx, before: &before, after: &status, world: &self.world, sc: &self.sc, rc_corrupted_us: self.rc_corrupted_us });
     }
 }
 

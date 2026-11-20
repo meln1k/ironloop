@@ -32,7 +32,7 @@ mod protect;
 pub mod req;
 mod script;
 
-use req::{REQ_NO_FAILSAFE_BEFORE_US, REQ_RECONVERGE_US};
+use req::{REQ_NO_FAILSAFE_BEFORE_US, REQ_OFF_SCRIPT_RESPONSE_US, REQ_RECONVERGE_US};
 
 /// A property the monitor checks.
 #[derive(Debug)]
@@ -172,6 +172,9 @@ pub struct Step<'a> {
     pub after: &'a Status,
     pub world: &'a World,
     pub sc: &'a Scenario,
+    /// When the sim last sent an RC frame corrupted in a way the CRC
+    /// passes: the firmware cannot tell it from the pilot's sticks.
+    pub rc_corrupted_us: Option<u64>,
 }
 
 /// A step plus the truth several properties judge it by.
@@ -200,6 +203,9 @@ struct Cx<'a> {
     /// `estimate_reconverges` judges it, and nothing that needs the
     /// estimate right (`estimate_tracks`, `angle_tracks`) is judged.
     reconverging: bool,
+    /// Within `REQ_OFF_SCRIPT_RESPONSE_US` of a corrupted RC frame that
+    /// passed the CRC: the quad is following a stick the pilot never sent.
+    rc_corrupted: bool,
     imu_step: bool,
     /// Time since the previous IMU step (at most 5 ms), or 0 on other steps.
     imu_dt: f32,
@@ -376,7 +382,7 @@ pub struct Monitor {
 
 impl Monitor {
     pub fn on_step(&mut self, s: Step) {
-        let Step { t, event, fx, before, after, world, sc } = s;
+        let Step { t, event, fx, before, after, world, sc, rc_corrupted_us } = s;
         let alt = world.altitude();
         let on_ground = world.body.on_ground;
         let imu_step = matches!(event.kind, EventKind::Imu { .. });
@@ -404,6 +410,7 @@ impl Monitor {
             excused: sc.unflyable() || excuses(sc, t, |e| e != Excuse::Nothing),
             wild: wild(sc, t),
             reconverging: self.gyro_saturated_us.is_some_and(|s| t - s < REQ_RECONVERGE_US),
+            rc_corrupted: rc_corrupted_us.is_some_and(|c| t.saturating_sub(c) < REQ_OFF_SCRIPT_RESPONSE_US),
             imu_step,
             imu_dt: if imu_step { t.saturating_sub(self.imu.last_us).min(5_000) as f32 * 1e-6 } else { 0.0 },
             touchdown,
