@@ -233,6 +233,8 @@ struct Flight {
     /// against it.
     clipped_last_us: u64,
     yaw_opposed_since_us: Option<u64>,
+    /// Last requested yaw rate, and when it last reversed or was released.
+    yaw_request: (f32, u64),
     /// When the yaw output started pushing hard against the yaw rate, and
     /// how fast it was then (rad/s).
     yaw_pushed_since: Option<(u64, f32)>,

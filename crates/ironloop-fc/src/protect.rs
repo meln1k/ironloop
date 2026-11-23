@@ -29,6 +29,10 @@ const YAW_RUNAWAY_US: u64 = 250_000;
 /// pushes hard against it is a runaway.
 const YAW_GROWTH_US: u64 = 50_000;
 
+/// How long (µs) a requested yaw reversal or release can still accelerate
+/// on the previous motor torque before growth is judged.
+const YAW_REVERSAL_US: u64 = 50_000;
+
 /// Yaw acceleration (rad/s², filtered) beyond what the motors can produce
 /// (about 250 at full differential thrust; a build spinning itself up
 /// reaches 150): the frame hit something.
@@ -83,13 +87,18 @@ pub(crate) fn runaway_and_crash(s: &mut State, gyro: Vec3, accel: Vec3, throttle
         let yaw_opposed = yaw_high && gyro.z * p.z < 0.0 && gyro.z.abs() > cfg.runaway_gyro;
         let yaw_opposed_for = held_for(&mut s.flight.yaw_opposed_since_us, yaw_opposed, now);
         // The same build shows sooner as a yaw rate that grows while the
-        // output pushes hard against it: one that flies slows down whatever
-        // it pushes against, so its rate never doubles. Comparing across a
-        // window, not the acceleration of the moment, keeps vibration and
-        // bounces out of it. It catches the build in the half second it
-        // takes to spin up, which at full throttle is enough to climb a
-        // meter.
-        let yaw_pushed = p.z.abs() >= yaw_lim * 0.5 && gyro.z * p.z < 0.0 && gyro.z.abs() > cfg.runaway_gyro;
+        // output pushes hard against it. A commanded reversal or release
+        // can briefly grow on the previous motor torque: let it settle
+        // before starting a window. Only the requested rate counts: output
+        // reversals alone also happen while a miswired build tumbles and
+        // must not postpone its stop. Other runaway checks keep counting.
+        let yaw = s.flight.setpoint.z;
+        let (previous, mut yaw_since) = s.flight.yaw_request;
+        if previous * yaw < 0.0 || (previous != 0.0 && yaw == 0.0) {
+            yaw_since = now;
+        }
+        s.flight.yaw_request = (yaw, yaw_since);
+        let yaw_pushed = now - yaw_since >= YAW_REVERSAL_US && p.z.abs() >= yaw_lim * 0.5 && gyro.z * p.z < 0.0 && gyro.z.abs() > cfg.runaway_gyro;
         // A bounce on the ground spins the frame up faster than any motor
         // can, and a window started during it would see the rest of the
         // hit as growth: a hit starts the window over once it has passed.
