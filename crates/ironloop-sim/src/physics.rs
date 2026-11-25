@@ -24,13 +24,19 @@ pub struct Airframe {
     pub k_t: f32,
     /// Prop drag torque per unit thrust (m).
     pub k_q_ratio: f32,
-    /// Prop speed at full command on `v_ref` volts (rad/s).
+    /// Prop speed at full command on `v_ref` volts (rad/s). With `kv` it
+    /// sets the motor's winding resistance (see `winding_r`).
     pub omega_max: f32,
     pub v_ref: f32,
-    pub tau_up: f32,
-    pub tau_down: f32,
-    /// Current per motor at full command (A).
-    pub motor_max_amps: f32,
+    /// Motor KV (RPM per volt, unloaded).
+    pub kv: f32,
+    /// Rotor inertia, bell and prop (kg·m²). With the winding resistance
+    /// and the prop's drag it sets how fast a motor changes speed: about
+    /// 40 ms at hover for 3e-8.
+    pub rotor_inertia: f32,
+    /// Bearing and iron losses as a constant torque (N·m): the no-load
+    /// current times `k_e`.
+    pub motor_friction: f32,
     /// Linear drag per axis (N per m/s), body frame.
     pub drag_lin: Vec3,
     /// Quadratic drag per axis (N per (m/s)²), body frame.
@@ -71,9 +77,13 @@ impl Default for Airframe {
             k_q_ratio: 0.0075,
             omega_max: 7576.0,
             v_ref: 3.9,
-            tau_up: 0.020,
-            tau_down: 0.030,
-            motor_max_amps: 4.74,
+            kv: 28000.0,
+            // Not measured: a 0702 bell (about 0.8 g of steel and magnets
+            // at 4-5 mm) and a 31 mm tri-blade (about 0.2 g) come to
+            // 2.5-3.5e-8.
+            rotor_inertia: 3.0e-8,
+            // Not measured: about 0.15 A of no-load current.
+            motor_friction: 5.0e-5,
             drag_lin: Vec3::new(0.004, 0.004, 0.006),
             drag_quad: Vec3::new(0.0035, 0.0035, 0.006),
             rotor_drag: 3.0e-7,
@@ -81,16 +91,53 @@ impl Default for Airframe {
             pole_pairs: 6.0,
             esc_start_us: 120_000,
             esc_start_power: 0.1,
-            esc_min_speed: 0.045,
+            // The speed 4.5% duty settles at on `v_ref` (see `vary_hardware`).
+            esc_min_speed: 0.053,
             esc_rampup: 3.0,
         }
+    }
+}
+
+/// The motors are DC motors driven by the ESC's PWM (inductance left out:
+/// its time constant is microseconds). Winding current is
+/// `(applied − k_e·ω) / R`, its torque `k_e·i`, against the prop's drag
+/// torque `k_q·ω²` and the motor's own friction.
+impl Airframe {
+    /// Back-EMF constant (V·s/rad), also the torque constant (N·m/A).
+    pub fn k_e(&self) -> f32 {
+        60.0 / (core::f32::consts::TAU * self.kv)
+    }
+
+    /// Prop drag torque per (rad/s)².
+    pub fn k_q(&self) -> f32 {
+        self.k_q_ratio * self.k_t
+    }
+
+    /// Winding resistance, with the ESC's and the wiring's (Ω): the one at
+    /// which full command on `v_ref` volts runs the prop at `omega_max`.
+    pub fn winding_r(&self) -> f32 {
+        let k_e = self.k_e();
+        k_e * (self.v_ref - k_e * self.omega_max) / (self.k_q() * self.omega_max * self.omega_max + self.motor_friction)
+    }
+
+    /// The speed a sound motor settles at with `volts` applied on average
+    /// (duty × pack voltage): where `k_e·(v − k_e·ω)/R = k_q·ω² + friction`.
+    pub fn steady_speed(&self, volts: f32) -> f32 {
+        let (k_e, r) = (self.k_e(), self.winding_r());
+        let c = r * self.k_q() / k_e;
+        let v = volts - r * self.motor_friction / k_e;
+        if v <= 0.0 {
+            return 0.0;
+        }
+        (sqrtf(k_e * k_e + 4.0 * c * v) - k_e) / (2.0 * c)
     }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum MotorHealth {
     Ok,
-    /// Producing this fraction of its normal speed (bent prop, worn bearing).
+    /// Driven at this fraction of the voltage the ESC applies (a weak or
+    /// shorted winding): it runs at about this fraction of its normal speed.
     Degraded(f32),
     /// ESC lost sync: the motor stalls and produces nothing.
     Desync,
@@ -307,11 +354,15 @@ impl World {
         let f = &self.frame;
         let b = &mut self.battery;
 
-        // Motors: first-order speed response toward the commanded speed,
-        // which scales with battery voltage (KV × volts).
-        let mut amps = b.base_amps;
-        let (k_up, k_down) = (1.0 - expf(-dt / f.tau_up), 1.0 - expf(-dt / f.tau_down));
-        for m in &mut self.motors {
+        // Motors: the ESC applies duty × pack voltage. Bluejay drives
+        // complementary PWM ("damped light"), so a motor turning faster than
+        // that voltage drives it brakes through negative current instead of
+        // coasting on its prop's drag. Only a stopped, starting-over or
+        // given-up ESC lets it coast. A weakened motor gets only part of the
+        // duty.
+        let (k_e, r, k_q) = (f.k_e(), f.winding_r(), f.k_q());
+        let mut duty = [None; 4];
+        for (m, duty) in self.motors.iter_mut().zip(&mut duty) {
             let signal = now_us.saturating_sub(m.last_frame_us) < ESC_SIGNAL_TIMEOUT_US;
             let cmd = if !signal || m.command < DSHOT_MIN || b.absent {
                 0.0
@@ -324,18 +375,37 @@ impl World {
                 MotorHealth::Desync | MotorHealth::Dead => 0.0,
             };
             let drive = esc(m, f, cmd, now_us, health > 0.0);
-            let target = drive * f.omega_max * (b.volts / f.v_ref).max(0.0) * health;
-            m.omega += (target - m.omega) * if target > m.omega { k_up } else { k_down };
+            if matches!(m.esc, Esc::Starting { .. } | Esc::Running { .. }) {
+                *duty = Some(drive * health);
+            }
+        }
+        // The pack draws the winding current of each driven motor for its
+        // PWM's on-time (a fraction `d` of it), and its terminal voltage
+        // drops by that current times its internal resistance. Both depend
+        // on each other, so solve them together: taking the voltage from
+        // the step before, a hard punch on a worn pack overshoots and
+        // oscillates (the loop gain 4·d²·r_int/R passes 1).
+        let (mut d2, mut back) = (0.0, 0.0);
+        for (m, d) in self.motors.iter().zip(duty) {
+            if let Some(d) = d {
+                d2 += d * d / r;
+                back += d * k_e * m.omega / r;
+            }
+        }
+        b.volts = if b.absent { 0.0 } else { ((b.open_circuit(b.soc) - b.r_int * (b.base_amps - back)) / (1.0 + b.r_int * d2)).max(0.0) };
+        let mut amps = b.base_amps;
+        for (m, d) in self.motors.iter_mut().zip(duty) {
+            let winding = d.map_or(0.0, |d| (d * b.volts - k_e * m.omega) / r);
+            let d = d.unwrap_or(0.0);
+            let alpha = (k_e * winding - k_q * m.omega * m.omega - f.motor_friction) / f.rotor_inertia;
+            m.omega = (m.omega + alpha * dt).max(0.0);
             m.phase = wrap_phase(m.phase + m.omega * dt);
-            let r = m.omega / f.omega_max;
-            amps += f.motor_max_amps * r * r * r;
+            amps += d * winding;
         }
         b.amps = amps;
         if !b.absent {
-            b.soc = (b.soc - amps * dt / 3600.0 / b.capacity_ah).max(0.0);
-            b.volts = (b.open_circuit(b.soc) - amps * b.r_int).max(0.0);
-        } else {
-            b.volts = 0.0;
+            // Braking motors can push a little charge back.
+            b.soc = (b.soc - amps * dt / 3600.0 / b.capacity_ah).clamp(0.0, 1.0);
         }
 
         self.wind.advance(dt, rng);
@@ -471,5 +541,96 @@ fn esc(m: &mut Motor, f: &Airframe, cmd: f32, now: u64, sound: bool) -> f32 {
         Esc::Starting { .. } => f.esc_start_power,
         Esc::Running { .. } => cmd.min(f.esc_start_power + f.esc_rampup * speed),
         _ => 0.0,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const DT_US: u64 = 250;
+
+    /// A default airframe on a pack that holds 3.9 V (the reference)
+    /// however much it draws, with ESCs that start at once.
+    fn bench() -> World {
+        let frame = Airframe { esc_start_us: 0, ..Airframe::default() };
+        // 3.9 V open circuit, between the 0.6 and 0.8 points of the curve.
+        let soc = 0.6 + 0.2 * (3.9 - 3.88) / (4.0 - 3.88);
+        let battery = Battery { capacity_ah: 1e6, soc, r_int: 0.0, volts: 3.9, amps: 0.0, base_amps: 0.0, lihv: false, absent: false };
+        World::new(frame, battery, Wind::calm())
+    }
+
+    /// Runs every motor at `command` for `secs`, from `t_us`; returns the
+    /// time reached and the first motor's speed after each step.
+    fn run(w: &mut World, command: u16, t_us: u64, secs: f32) -> (u64, Vec<f32>) {
+        let mut rng = Rng::new(1);
+        let mut t = t_us;
+        let mut speeds = Vec::new();
+        for _ in 0..(secs * 1e6) as u64 / DT_US {
+            t += DT_US;
+            for m in &mut w.motors {
+                m.command = command;
+                m.last_frame_us = t;
+            }
+            w.step(DT_US as f32 * 1e-6, t, &mut rng);
+            speeds.push(w.motors[0].omega);
+        }
+        (t, speeds)
+    }
+
+    fn command(duty: f32) -> u16 {
+        DSHOT_MIN + libm::roundf(duty * (DSHOT_MAX - DSHOT_MIN) as f32) as u16
+    }
+
+    #[test]
+    fn full_command_reaches_the_rated_speed_and_current() {
+        let mut w = bench();
+        run(&mut w, DSHOT_MAX, 0, 1.0);
+        let omega = w.motors[0].omega;
+        assert!((omega - 7576.0).abs() < 0.01 * 7576.0, "{omega}");
+        // Per motor (k_q·ω² + friction) / k_e = (1.808e-3 + 5e-5) / 3.41e-4.
+        let amps = w.battery.amps / 4.0;
+        assert!((amps - 5.45).abs() < 0.1, "{amps}");
+    }
+
+    #[test]
+    fn hover_needs_less_duty_than_its_share_of_full_speed() {
+        // Hover is 0.0314 kg × g / 4 = 0.077 N a motor, 4281 rad/s: 57% of
+        // full speed, but 48.8% duty, since the back-EMF takes most of the
+        // voltage and the drag torque grows with the speed squared.
+        let mut w = bench();
+        run(&mut w, command(0.488), 0, 1.0);
+        let thrust = w.thrust(0);
+        let hover = 0.0314 * GRAVITY / 4.0;
+        assert!((thrust - hover).abs() < 0.02 * hover, "{thrust} N against {hover} N");
+    }
+
+    #[test]
+    fn a_small_step_at_hover_settles_with_the_rotor_time_constant() {
+        // J / (k_e²/R + 2·k_q·ω) = 3e-8 / 7.5e-7 at hover: 40 ms, both up
+        // and down (the ESC brakes as hard as it drives).
+        for (from, to) in [(0.488, 0.508), (0.508, 0.488)] {
+            let mut w = bench();
+            let (t, _) = run(&mut w, command(from), 0, 1.0);
+            let start = w.motors[0].omega;
+            let (_, speeds) = run(&mut w, command(to), t, 0.5);
+            let end = *speeds.last().unwrap();
+            let reached = speeds.iter().position(|&s| (s - start) / (end - start) >= 1.0 - (-1.0f32).exp()).unwrap();
+            let tau_ms = (reached + 1) as f32 * DT_US as f32 * 1e-3;
+            assert!((tau_ms - 40.0).abs() < 4.0, "{from} -> {to}: {tau_ms} ms");
+        }
+    }
+
+    #[test]
+    fn steady_speed_matches_the_simulated_motor() {
+        let mut w = bench();
+        run(&mut w, command(0.3), 0, 1.0);
+        let want = w.frame.steady_speed(command_duty(command(0.3)) * 3.9);
+        let omega = w.motors[0].omega;
+        assert!((omega - want).abs() < 0.005 * want, "{omega} against {want}");
+    }
+
+    fn command_duty(c: u16) -> f32 {
+        (c - DSHOT_MIN) as f32 / (DSHOT_MAX - DSHOT_MIN) as f32
     }
 }

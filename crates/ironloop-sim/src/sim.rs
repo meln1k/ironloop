@@ -22,7 +22,6 @@ use crate::rng::Rng;
 use crate::scenario::{Fault, FaultKind, Scenario};
 
 const PHYSICS_DT_US: u64 = 250;
-const MOTOR_LATENCY_US: u64 = 115;
 const TICK_US: u64 = 1_000;
 const TELEMETRY_US: u64 = 1_000;
 const BATTERY_US: u64 = 20_000;
@@ -702,7 +701,7 @@ impl Sim {
                 Effect::Motors(m) => {
                     m.into_iter().for_each(|v| Fnv(&mut self.motor_hash).u16(v));
                     self.pending_motors.push_back(m);
-                    self.schedule(self.t_us + cost_us + MOTOR_LATENCY_US, Ev::ApplyMotors);
+                    self.schedule(self.t_us + cost_us + self.sc.motor_latency_us, Ev::ApplyMotors);
                 }
                 Effect::Led(on) => self.led = on,
                 Effect::Beeper(on) => self.beeper = on,

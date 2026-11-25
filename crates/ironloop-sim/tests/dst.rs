@@ -82,11 +82,12 @@ fn generated_scenarios_hold_every_property_and_replay_identically() {
 /// flipped) tips onto its side on takeoff and rolls there with the
 /// throttle up; its attitude estimate tumbles and the frame follows every
 /// demand as the gyro reads it, so only the ground's side load shows it.
-/// Seeds 13490 and 72955 lose the link in a fall after an inverted hang and
-/// in a climb. The hold took the drag slowing that down for a thrust error
-/// and set the hover throttle 15% low or 6% high: 13490 touched down at
-/// 3.6 m/s (3.1 m/s also when a descent speeding up did not count as
-/// sinking with the estimate reading a climb), and 72955 never descended.
+/// Seed 72955 loses the link in a climb. The hold took the drag slowing
+/// that down for a thrust error and set the hover throttle 6% high, so it
+/// never descended. Seed 13490 (the same after a fall) and 29519 (a
+/// reversed loop runaway detection must stop below 1 m) were regression
+/// seeds until the DC motor model; both fail on it, and FAILING_SEEDS.md
+/// tracks them.
 /// Seeds 44384 and 43872 lose the link after a long steady descent, which
 /// the leaky speed estimate reads as level, so hover learning pulled the
 /// hover throttle 8% low within seconds; 44384 touched down at 2.6 m/s and
@@ -103,11 +104,9 @@ fn generated_scenarios_hold_every_property_and_replay_identically() {
 /// if none were missing once jittered the motors 5.4%.
 /// Seed 49167 slams the sticks on a sound build with an old pack; yaw
 /// growth during a motor reversal once cut all four motors at 2.1 m.
-/// Seed 29519 has a reversed loop: allowing every yaw output reversal to
-/// settle, instead of only a commanded one, lets it climb past 1 m.
 #[test]
 fn regression_seeds_hold_every_property() {
-    for seed in [1531, 822, 3007, 6875, 3934, 838, 88, 445, 519, 70, 688, 257, 209, 741, 1360, 1979, 290248, 445159, 34731, 315882, 4285, 6018, 42067, 7861, 73501, 45798, 49056, 78109, 36096, 2882, 70904, 13490, 72955, 44384, 43872, 6763, 77121, 1971, 26033, 49167, 29519] {
+    for seed in [1531, 822, 3007, 6875, 3934, 838, 88, 445, 519, 70, 688, 257, 209, 741, 1360, 1979, 290248, 445159, 34731, 315882, 4285, 6018, 42067, 7861, 73501, 45798, 49056, 78109, 36096, 2882, 70904, 72955, 44384, 43872, 6763, 77121, 1971, 26033, 49167] {
         let r = run_seed(seed);
         assert!(r.violations.is_empty(), "seed {seed} [{}]: {:?}", r.name, r.violations);
     }

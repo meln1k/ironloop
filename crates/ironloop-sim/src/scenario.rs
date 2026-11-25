@@ -366,10 +366,14 @@ pub struct Scenario {
     /// wait states behind the ART accelerator, FP divides, and stalls make
     /// it more than one.
     pub cycles_per_instruction: f32,
-    /// Battery voltage under which the receiver (an ESP8285, 2.5 V minimum,
-    /// behind the board's regulator) browns out and reboots. The MCU, IMU
-    /// and ESCs hold on below it.
+    /// Battery voltage under which the receiver (an ESP8285) browns out and
+    /// reboots: where the board's 5 V boost converter, which it runs from
+    /// behind a 3.3 V regulator, stops (about 2.0-2.5 V; not measured). The
+    /// MCU, IMU and ESCs hold on below it.
     pub rx_brownout_v: f32,
+    /// From the end of a step to the ESCs acting on its command (µs): the
+    /// DShot300 frame (about 53 µs) and the ESC's own processing.
+    pub motor_latency_us: u64,
 }
 
 /// Length of a [`Action::StickScript`] segment.
@@ -534,6 +538,7 @@ impl Scenario {
             vbat_gain: 1.0,
             cycles_per_instruction: 1.4,
             rx_brownout_v: 2.7,
+            motor_latency_us: 115,
         }
     }
 
@@ -560,7 +565,9 @@ impl Scenario {
         // Drawn last so it left the rest of each scenario as it was.
         sc.vbat_gain = r.range(0.97, 1.03);
         sc.cycles_per_instruction = Rng::fork(seed, "cpu").range(1.1, 1.8);
-        sc.rx_brownout_v = Rng::fork(seed, "brownout").range(2.6, 2.85);
+        sc.rx_brownout_v = Rng::fork(seed, "brownout").range(2.0, 2.5);
+        // Not measured.
+        sc.motor_latency_us = Rng::fork(seed, "motor-latency").range_u64(80, 250);
         tags.sort();
         tags.dedup();
         sc.name = if tags.is_empty() { "clean".into() } else { tags.join(",") };
@@ -574,16 +581,24 @@ impl Scenario {
         f.mass *= r.range(0.92, 1.12);
         f.inertia = f.inertia * r.range(0.85, 1.2);
         f.k_t *= r.range(0.9, 1.08);
-        f.tau_up *= r.range(0.8, 1.3);
-        f.tau_down *= r.range(0.8, 1.3);
+        // How fast a motor changes speed: rotor inertia sets it with the
+        // winding resistance. The second draw is left over from the
+        // first-order motor this replaced; it keeps every later draw, and
+        // so every seed's scenario, as it was.
+        f.rotor_inertia *= r.range(0.8, 1.3);
+        let _ = r.range(0.8, 1.3);
+        let m = &mut Rng::fork(self.seed, "motor");
+        f.kv *= m.range(0.95, 1.05);
+        f.motor_friction *= m.range(0.5, 2.0);
         // The ESC: how long it takes to start a motor, the slowest speed it
         // keeps sync at, and how hard it limits acceleration at low speed.
         // Nobody has measured these on this quad; the slowest speed is set
-        // so that the factory idle (6-10%) runs on a charged pack. Drawn
+        // so that the factory idle (6-10%) runs on a charged pack: the
+        // speed 3-6% duty settles at on the reference voltage. Drawn
         // from their own stream so the rest of each scenario is unchanged.
         let e = &mut Rng::fork(self.seed, "esc");
         f.esc_start_us = e.range_u64(50_000, 250_000);
-        f.esc_min_speed = e.range(0.03, 0.06);
+        f.esc_min_speed = f.steady_speed(e.range(0.03, 0.06) * f.v_ref) / f.omega_max;
         f.esc_rampup = e.range(2.0, 4.0);
         for k in [&mut f.drag_lin, &mut f.drag_quad] {
             *k = *k * r.range(0.7, 1.4);
@@ -591,8 +606,12 @@ impl Scenario {
 
         // Battery: charge, internal resistance (aged packs sag hard).
         self.battery.soc = r.range(0.12, 1.0);
-        // A fresh 300 mAh 1S pack is about 0.03-0.08 ohm, a worn one 0.15.
-        self.battery.r_int = r.range(0.03, 0.15);
+        // Pack, connector and leads together: about 0.02-0.05 ohm fresh,
+        // 0.09 worn. Not measured. With the motors' real inrush (19 A at
+        // full throttle, as the SE0702 datasheet gives), 0.15 sagged a pack
+        // to below 1.5 V, which a flying 1S whoop does not do. Scaled
+        // rather than redrawn, so every later draw is as it was.
+        self.battery.r_int = r.range(0.03, 0.15) * 0.6;
         // The quad ships with LiHV packs, and its HDZero VTX alone draws
         // about 1.5 A (5-6 W). Their own stream keeps the rest of each
         // scenario as it was.
@@ -606,7 +625,7 @@ impl Scenario {
         if self.battery.soc < 0.3 {
             tags.push("low-battery".into());
         }
-        if self.battery.r_int > 0.11 {
+        if self.battery.r_int > 0.066 {
             tags.push("old-pack".into());
         }
 

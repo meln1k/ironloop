@@ -162,7 +162,11 @@ impl Flight {
         let s = &mut self.sag;
         s.secs += cx.imu_dt;
         s.spin += world.motors.iter().map(|m| m.omega).sum::<f32>() / (4.0 * world.frame.omega_max) * cx.imu_dt;
-        s.want += (REQ_IDLE * volts / REQ_SAG_REF_V + (1.0 - REQ_IDLE) * stick_thr) * cx.imu_dt;
+        // The speed the stick asks for is the one the motors settle at with
+        // the voltage it applies at the reference voltage, the idle aside
+        // (that is not compensated).
+        let want_volts = REQ_IDLE * volts + (1.0 - REQ_IDLE) * stick_thr * REQ_SAG_REF_V;
+        s.want += world.frame.steady_speed(want_volts) / world.frame.omega_max * cx.imu_dt;
         if s.secs >= 0.5 {
             v.live(&SAG_COMPENSATED);
             let ratio = s.spin / s.want;
