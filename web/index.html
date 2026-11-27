@@ -39,6 +39,8 @@
   #armmsg { font: 11px/1.2 ui-monospace, monospace; color: #e6edf3; text-shadow: 0 1px 2px #000; max-width: 46vw; text-align: center; min-height: 13px; }
   #flt.acro { border-color: #a371f7; }
   #cam.fpv { background: #1f6feb; border-color: #58a6ff; color: #fff; }
+  #fz.fzon { background: #8e3b1e; border-color: #ff9d5c; color: #fff; }
+  #tx button#clr { display: none; background: #b62324; border-color: #ff7b72; color: #fff; }
 </style>
 </head>
 <body>
@@ -51,6 +53,8 @@
     <button id="arm" title="Arm switch (Space)">ARM</button>
     <div class="row">
       <button id="flt" title="Flight mode (M)">ANGLE</button>
+      <button id="fz" title="Automatic failure injection while you fly (F): DST-style faults every few seconds, one at a time, none that end the flight">AUTO FAIL</button>
+      <button id="clr" title="Clear the active fault (0): shown while an 'until cleared' fault like a weak motor is live">CLEAR FAULT</button>
       <button id="txmode" title="Stick layout">Mode 2</button>
       <button id="cam" title="First-person view from the drone's camera (C cycles all cameras)">FPV</button>
     </div>
@@ -68,12 +72,13 @@
   // On-screen transmitter. Writes window.__ilIn, which the Bevy app reads
   // every frame: [roll, pitch, yaw, throttle, then four "being touched"
   // flags in the same order, arm presses, flight-mode presses, camera
-  // presses]. The app
+  // presses, auto-fault presses, clear-fault presses]. The app
   // writes back window.__ilOut = [roll, pitch, yaw, throttle, arm switch,
-  // armed, acro, fpv] and window.__ilStatus, so the knobs and buttons always show
+  // armed, acro, fpv, auto faults, sticky fault live] and window.__ilStatus,
+  // so the knobs and buttons always show
   // what the firmware receives, from any input device.
   (() => {
-    const IN = new Float32Array(11);
+    const IN = new Float32Array(13);
     window.__ilIn = IN;
     const AX = { roll: 0, pitch: 1, yaw: 2, throttle: 3 };
     let txMode = localStorage.getItem('ilTxMode') === '1' ? 1 : 2;
@@ -82,7 +87,7 @@
       ? { gl: { x: 'yaw', y: 'throttle' }, gr: { x: 'roll', y: 'pitch' } }
       : { gl: { x: 'yaw', y: 'pitch' }, gr: { x: 'roll', y: 'throttle' } };
     const canvas = document.getElementById('bevy');
-    const out = () => window.__ilOut || [0, 0, 0, 0, 0, 0, 0, 0];
+    const out = () => window.__ilOut || [0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
     const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
 
     // Each gimbal follows one pointer (mouse or finger; two fingers fly both
@@ -137,6 +142,8 @@
     button('arm', () => { IN[8] += 1; });
     button('flt', () => { IN[9] += 1; });
     button('cam', () => { IN[10] += 1; });
+    button('fz', () => { IN[11] += 1; });
+    button('clr', () => { IN[12] += 1; });
     button('txmode', () => {
       txMode = txMode === 2 ? 1 : 2;
       localStorage.setItem('ilTxMode', String(txMode));
@@ -146,6 +153,8 @@
     const arm = document.getElementById('arm'), flt = document.getElementById('flt');
     const msg = document.getElementById('armmsg'), txb = document.getElementById('txmode');
     const cam = document.getElementById('cam');
+    const fz = document.getElementById('fz');
+    const clr = document.getElementById('clr');
     const draw = () => {
       const o = out(), l = layout();
       const val = name => name === 'throttle' ? o[3] * 2 - 1 : o[AX[name]];
@@ -163,6 +172,9 @@
       txb.textContent = `Mode ${txMode}`;
       cam.className = o[7] > 0.5 ? 'fpv' : '';
       cam.textContent = o[7] > 0.5 ? 'FPV ON' : 'FPV';
+      fz.className = o[8] > 0.5 ? 'fzon' : '';
+      fz.textContent = o[8] > 0.5 ? 'AUTO FAIL ON' : 'AUTO FAIL';
+      clr.style.display = o[9] > 0.5 ? 'block' : 'none';
       requestAnimationFrame(draw);
     };
     requestAnimationFrame(draw);

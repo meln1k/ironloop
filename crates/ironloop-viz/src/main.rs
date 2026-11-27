@@ -11,6 +11,7 @@ use bevy::prelude::*;
 use bevy::window::WindowPlugin;
 use ironloop_fc::math::{Quat as FQuat, Vec3 as FVec3};
 use ironloop_fc::{ArmBlockers, BatteryLevel, FailsafeStage, FlightMode, Notice};
+use ironloop_sim::rng::Rng;
 use ironloop_sim::{FOREVER, FaultKind, Scenario, Sim, Sticks};
 
 fn main() {
@@ -27,8 +28,9 @@ fn main() {
             ..default()
         }))
         .insert_resource(App_::new())
+        .add_message::<FaultPop>()
         .add_systems(Startup, setup)
-        .add_systems(Update, (input, step_sim, draw, publish_to_page).chain())
+        .add_systems(Update, (input, step_sim, fault_pops, combat_log_ui, draw, publish_to_page).chain())
         .add_systems(Update, fit_hud_to_window)
         .run();
 }
@@ -70,14 +72,33 @@ struct App_ {
     page_arm_presses: u32,
     page_mode_presses: u32,
     page_cam_presses: u32,
+    page_fz_presses: u32,
+    page_clr_presses: u32,
     /// Third-person camera to return to when FPV is switched off.
     prev_cam: CamMode,
+    /// Automatic failure injection: while flying, add a DST-style fault
+    /// every few seconds, one at a time and only the kinds the firmware
+    /// flies through, so its fault handling can be watched.
+    auto_faults: bool,
+    next_auto_fault_us: u64,
+    /// Indices into `sim.sc.faults` of the faults auto mode injected, so
+    /// switching it off ends them.
+    auto_fault_marks: Vec<usize>,
+    /// How many faults auto mode has injected this session.
+    auto_faults_injected: u32,
+    /// The combat log: every fault landing and ending, newest last.
+    combat_log: Vec<CombatEntry>,
+    /// Which faults have been logged as started (`fault_seen[i]` tracks
+    /// `sc.faults[i]`).
+    fault_seen: Vec<bool>,
+    rng_auto: Rng,
 }
 
 impl App_ {
     fn new() -> Self {
         let mut sim = Sim::new(Scenario::manual(1));
         sim.manual = Some(Sticks::default());
+        let rng_auto = Rng::fork(sim.sc.seed, "auto-faults");
         App_ {
             sim,
             paused: false,
@@ -94,7 +115,16 @@ impl App_ {
             page_arm_presses: 0,
             page_mode_presses: 0,
             page_cam_presses: 0,
+            page_fz_presses: 0,
+            page_clr_presses: 0,
             prev_cam: CamMode::Chase,
+            auto_faults: false,
+            next_auto_fault_us: 0,
+            auto_fault_marks: Vec::new(),
+            auto_faults_injected: 0,
+            combat_log: Vec::new(),
+            fault_seen: Vec::new(),
+            rng_auto,
         }
     }
 
@@ -106,6 +136,7 @@ impl App_ {
         self.sticks = Sticks::default();
         self.trail.clear();
         self.rc_loss_on = false;
+        self.after_flight_reset();
     }
 
     fn load_seed(&mut self, seed: u64) {
@@ -113,6 +144,126 @@ impl App_ {
         self.replay = Some(seed);
         self.trail.clear();
         self.rc_loss_on = false;
+        self.after_flight_reset();
+    }
+
+    /// Auto fault injection follows the flight: its marks point into the old
+    /// sim's fault list, and the first fault of the next flight comes soon.
+    fn after_flight_reset(&mut self) {
+        self.auto_fault_marks.clear();
+        self.fault_seen.clear();
+        self.next_auto_fault_us = self.sim.t_us + self.rng_auto.range_u64(2_000_000, 4_000_000);
+    }
+
+    /// Flips automatic failure injection, ending the faults it injected.
+    fn toggle_auto_faults(&mut self) {
+        self.auto_faults = !self.auto_faults;
+        let t = self.sim.t_us;
+        if self.auto_faults {
+            self.next_auto_fault_us = t + self.rng_auto.range_u64(1_000_000, 3_000_000);
+        } else {
+            for i in self.auto_fault_marks.drain(..) {
+                let f = &mut self.sim.sc.faults[i];
+                if f.active(t) {
+                    f.dur_us = t - f.at_us;
+                }
+            }
+        }
+    }
+
+    /// The next fault to inject: one of the DST workload generator's kinds
+    /// with its parameter ranges, minus the ones that end the flight (a dead
+    /// motor, an impact that tumbles the quad, a mid-air reboot, a link loss
+    /// long enough to land it). Motor degradation is gentler than the DST's
+    /// (0.7–0.9 rather than 0.6–0.9) so the quad stays easy to fly.
+    fn next_auto_fault(&mut self) -> (FaultKind, u64) {
+        let r = &mut self.rng_auto;
+        let motor = r.range_u64(0, 4) as u8;
+        match r.range_u64(0, 15) {
+            // Log-uniform, so short 2-5 ms gaps are as common as long ones.
+            0 => (FaultKind::ImuDropout, r.range(1_000.0f32.ln(), 60_000.0f32.ln()).exp() as u64),
+            1 => (FaultKind::ImuStuck, r.range_u64(5_000, 100_000)),
+            2 => (FaultKind::ImuGarbage { p: r.range(0.001, 0.05) }, r.range_u64(100_000, 2_000_000)),
+            3 => {
+                let k = r.range(0.004, 0.02);
+                let axis = FVec3::new(r.normal(), r.normal(), 0.3 * r.normal()).normalized();
+                (FaultKind::Kick { torque: axis * k }, r.range_u64(5_000, 40_000))
+            }
+            4 => (FaultKind::MotorDesync { motor }, r.range_u64(20_000, 300_000)),
+            5 => (FaultKind::MotorDegraded { motor, factor: r.range(0.7, 0.9) }, FOREVER),
+            6 | 7 => (FaultKind::RcLoss, *r.pick(&[30_000, 80_000, 150_000, 600_000])),
+            8 => (FaultKind::RcGlitch { p: r.range(0.01, 0.3) }, r.range_u64(200_000, 3_000_000)),
+            9 => (FaultKind::TelemetryLoss, r.range_u64(100_000, 2_000_000)),
+            10 => {
+                let d = r.range(0.0, core::f32::consts::TAU);
+                let v = r.range(2.0, 6.0);
+                (FaultKind::WindShift { wind: FVec3::new(d.cos() * v, d.sin() * v, 0.0) }, r.range_u64(1_000_000, 4_000_000))
+            }
+            11 => (FaultKind::ClockGlitch { back_us: r.range_u64(1, 5_000) }, 1),
+            12 => (FaultKind::TimingJitter { jitter_us: r.range_u64(50, 400) }, r.range_u64(500_000, 3_000_000)),
+            13 => (FaultKind::EventDrop { p: r.range(0.01, 0.2) }, r.range_u64(200_000, 2_000_000)),
+            _ => (FaultKind::FcStall, r.range_u64(1_000, 15_000)),
+        }
+    }
+
+    /// While auto mode is on and the user is flying, inject one fault when
+    /// the last one has long ended, then draw the next gap.
+    fn auto_fault_tick(&mut self, pops: &mut MessageWriter<FaultPop>) {
+        if !self.auto_faults || self.replay.is_some() {
+            return;
+        }
+        let t = self.sim.t_us;
+        let flying = self.sim.status.armed
+            && self.sim.world.altitude() > 0.3
+            && self.sim.status.failsafe == FailsafeStage::None
+            && !self.sim.done();
+        let quiet = self.sim.sc.faults.iter().all(|f| !f.active(t));
+        if !flying || !quiet || t < self.next_auto_fault_us {
+            return;
+        }
+        let (kind, dur) = self.next_auto_fault();
+        self.sim.inject(kind, dur);
+        self.auto_fault_marks.push(self.sim.sc.faults.len() - 1);
+        self.auto_faults_injected += 1;
+        self.next_auto_fault_us = t + self.rng_auto.range_u64(4_000_000, 10_000_000);
+        let (label, color) = fault_pop(&kind);
+        pops.write(FaultPop { label: label.into(), color });
+    }
+
+    /// Appends to the combat log, keeping the last 100 entries.
+    fn log(&mut self, t_us: u64, text: String, color: Color) {
+        self.combat_log.push(CombatEntry { t_us, text, color });
+        if self.combat_log.len() > 100 {
+            self.combat_log.remove(0);
+        }
+    }
+
+    /// Watches the sim's fault list for faults starting and ending, and
+    /// logs each: the combat log's hits and their outcomes.
+    fn update_combat_log(&mut self) {
+        let t = self.sim.t_us;
+        self.fault_seen.resize(self.sim.sc.faults.len(), false);
+        for i in 0..self.sim.sc.faults.len() {
+            let f = self.sim.sc.faults[i];
+            let was = self.fault_seen[i];
+            if f.active(t) && !was {
+                self.fault_seen[i] = true;
+                let (label, color) = fault_pop(&f.kind);
+                let dur = if f.dur_us == FOREVER {
+                    "until cleared".to_string()
+                } else if f.dur_us >= 1_000_000 {
+                    format!("{:.1} s", f.dur_us as f64 * 1e-6)
+                } else {
+                    format!("{} ms", f.dur_us / 1000)
+                };
+                let tag = if self.auto_fault_marks.contains(&i) { "  -  auto" } else { "" };
+                self.log(t, format!("{label} - {dur}{tag}"), color);
+            } else if !f.active(t) && was {
+                self.fault_seen[i] = false;
+                let (label, _) = fault_pop(&f.kind);
+                self.log(t, format!("{label} over - {:.1} s", (t - f.at_us) as f64 * 1e-6), Color::srgba(0.75, 0.8, 0.85, 0.85));
+            }
+        }
     }
 }
 
@@ -136,6 +287,144 @@ struct HudLeft;
 struct HudRight;
 #[derive(Component)]
 struct HudHelp;
+
+/// A fault that just landed, shown as a floating damage number over the
+/// quad, damage-numbers-in-an-MMO style.
+#[derive(Message)]
+struct FaultPop {
+    label: String,
+    color: Color,
+}
+
+/// What a fault announces itself as, and in what color.
+fn fault_pop(kind: &FaultKind) -> (String, Color) {
+    let red = Color::srgb(1.0, 0.30, 0.25);
+    let orange = Color::srgb(1.0, 0.62, 0.20);
+    let yellow = Color::srgb(1.0, 0.92, 0.35);
+    let violet = Color::srgb(0.80, 0.55, 1.0);
+    let cyan = Color::srgb(0.45, 0.95, 1.0);
+    match kind {
+        FaultKind::ImuDropout => ("IMU DROPOUT".into(), orange),
+        FaultKind::ImuStuck => ("IMU STUCK".into(), orange),
+        FaultKind::ImuGarbage { .. } => ("IMU CORRUPT SAMPLES".into(), yellow),
+        FaultKind::Kick { .. } => ("PROP STRIKE".into(), red),
+        FaultKind::Impact { .. } => ("HARD IMPACT".into(), red),
+        FaultKind::MotorDesync { motor } => (format!("MOTOR {motor} DESYNC"), red),
+        FaultKind::MotorDead { motor } => (format!("MOTOR {motor} DEAD"), red),
+        FaultKind::MotorDegraded { motor, factor } => {
+            (format!("MOTOR {motor} WEAK {}%", ((1.0 - factor) * 100.0) as i32), orange)
+        }
+        FaultKind::RcLoss => ("RC LINK LOST".into(), red),
+        FaultKind::RcGlitch { .. } => ("RC FRAME CORRUPT".into(), yellow),
+        FaultKind::TelemetryLoss => ("DSHOT TELEM LOST".into(), yellow),
+        FaultKind::WindShift { wind } => (format!("GUST {:.1} m/s", wind.norm()), cyan),
+        FaultKind::ClockGlitch { .. } => ("CLOCK JUMPED BACK".into(), violet),
+        FaultKind::TimingJitter { .. } => ("SCHEDULER JITTER".into(), violet),
+        FaultKind::EventDrop { .. } => ("EVENT QUEUE DROP".into(), violet),
+        FaultKind::FcStall => ("FC TASK STALL".into(), violet),
+        FaultKind::RebootRequest => ("REBOOT REQUEST".into(), red),
+    }
+}
+
+/// One floating damage number: anchored to a world point, it pops large,
+/// rises, and fades.
+#[derive(Component)]
+struct Pop {
+    anchor: Vec3,
+    age: f32,
+    dur: f32,
+    base_size: f32,
+    dx: f32,
+}
+
+/// One combat-log line.
+struct CombatEntry {
+    t_us: u64,
+    text: String,
+    color: Color,
+}
+
+#[derive(Component)]
+struct HudLog;
+
+/// Rebuilds the combat log panel's lines whenever the log changed.
+fn combat_log_ui(
+    app: Res<App_>,
+    mut rendered: Local<usize>,
+    log_ui: Query<Entity, With<HudLog>>,
+    children: Query<&Children, With<HudLog>>,
+    mut commands: Commands,
+) {
+    if app.combat_log.len() == *rendered {
+        return;
+    }
+    *rendered = app.combat_log.len();
+    let Ok(e) = log_ui.single() else { return; };
+    for child in children.iter().flatten() {
+        commands.entity(*child).despawn();
+    }
+    commands.entity(e).with_children(|p| {
+        for entry in app.combat_log.iter().rev().take(9).collect::<Vec<_>>().into_iter().rev() {
+            p.spawn((
+                TextSpan(format!("{:>7.2}s  {}\n", entry.t_us as f64 * 1e-6, entry.text)),
+                TextFont { font_size: FontSize::Px(9.5), ..default() },
+                TextColor(entry.color),
+            ));
+        }
+    });
+}
+
+/// Spawns a pop for each fault that lands and animates the live ones.
+#[allow(clippy::type_complexity)]
+fn fault_pops(
+    time: Res<Time>,
+    mut commands: Commands,
+    mut events: MessageReader<FaultPop>,
+    mut pops: Query<(Entity, &mut Node, &mut TextColor, &mut TextFont, &mut Pop)>,
+    cam: Query<(&Camera, &GlobalTransform), (With<MainCam>, Without<Drone>)>,
+    drone: Query<&GlobalTransform, (With<Drone>, Without<MainCam>)>,
+) {
+    let dt = time.delta_secs().min(0.1);
+    if let Ok(t) = drone.single() {
+        // Spawn above the canopy, jittered left and right like the MMO
+        // crits stacking on one target.
+        let anchor = t.translation() + Vec3::Y * 0.06;
+        let seed = (time.elapsed_secs() * 997.0) as usize;
+        for pop in events.read() {
+            let dx = ((seed % 61) as f32 - 30.0) * 1.6;
+            commands.spawn((
+                Node { position_type: PositionType::Absolute, ..default() },
+                Text::new(pop.label.clone()),
+                TextFont { font_size: FontSize::Px(30.0), ..default() },
+                TextColor(pop.color),
+                TextLayout::justify(Justify::Center),
+                Pop { anchor, age: 0.0, dur: 1.4, base_size: 30.0, dx },
+            ));
+        }
+    }
+    let mut dead = Vec::new();
+    for (e, mut node, mut color, mut font, mut pop) in &mut pops {
+        pop.age += dt;
+        if pop.age >= pop.dur {
+            dead.push(e);
+            continue;
+        }
+        // Pop: starts half again as big and settles within 150 ms.
+        let grow = 1.0 + 0.5 * (1.0 - (pop.age / 0.15).min(1.0));
+        font.font_size = FontSize::Px(pop.base_size * grow);
+        if let Ok((cam, tr)) = cam.single() {
+            if let Ok(vp) = cam.world_to_viewport(tr, pop.anchor) {
+                node.left = Val::Px(vp.x + pop.dx);
+                node.top = Val::Px(vp.y - 40.0 - pop.age * 70.0);
+            }
+        }
+        let fade = ((pop.dur - pop.age) / 0.5).min(1.0);
+        color.0.set_alpha(fade.max(0.0));
+    }
+    for e in dead {
+        commands.entity(e).despawn();
+    }
+}
 
 fn setup(
     mut commands: Commands,
@@ -245,14 +534,23 @@ fn setup(
         panel,
         Node { position_type: PositionType::Absolute, bottom: px(6), left: px(6), padding: UiRect::all(px(6)), ..default() },
     ));
+    // The combat log, lifted above the on-screen transmitter's right stick.
+    commands.spawn((
+        HudLog,
+        Text::new(""),
+        font(9.5),
+        TextColor(Color::srgb(0.9, 0.95, 1.0)),
+        panel,
+        Node { position_type: PositionType::Absolute, bottom: px(300), right: px(6), padding: UiRect::all(px(6)), ..default() },
+    ));
 }
 
 const HELP: &str = "\
 Space arm switch   W/S throttle   A/D yaw   arrows roll/pitch (Shift = full)   X cut throttle
-M angle/acro   C camera   R reset   P pause   ,/. slower/faster   H toggle help
+M angle/acro   C camera   F auto faults   R reset   P pause   ,/. slower/faster   H toggle help
 Gamepad (mode 2): left stick throttle/yaw, right stick roll/pitch, A arm, B mode
-Faults: 1 RC loss (toggle)  2 desync 0.3s  3 kill motor  4 IMU dropout  5 IMU garbage
-        6 wind gust  7 collision  8 drain battery  0 clear
+Faults: F auto inject while flying  1 RC loss (toggle)  2 desync 0.3s  3 kill motor
+        4 IMU dropout  5 IMU garbage  6 wind gust  7 collision  8 drain battery  0 clear
 DST: N replay next seed with the virtual pilot   B back to manual";
 
 fn input(
@@ -261,6 +559,7 @@ fn input(
     time: Res<Time>,
     mut app: ResMut<App_>,
     mut help: Query<&mut Visibility, With<HudHelp>>,
+    mut pops: MessageWriter<FaultPop>,
 ) {
     let dt = time.delta_secs().min(0.1);
     let app = &mut *app;
@@ -294,6 +593,9 @@ fn input(
             app.prev_cam = app.cam;
         }
     }
+    if keys.just_pressed(KeyCode::KeyF) {
+        app.toggle_auto_faults();
+    }
     if keys.just_pressed(KeyCode::KeyH) {
         app.help = !app.help;
         for mut v in &mut help {
@@ -304,10 +606,13 @@ fn input(
     // Fault injection.
     let sim = &mut app.sim;
     let motor = (sim.t_us / 1000 % 4) as u8;
+    let mut deferred_log: Option<(u64, String, Color)> = None;
     if keys.just_pressed(KeyCode::Digit1) {
         app.rc_loss_on = !app.rc_loss_on;
         if app.rc_loss_on {
             sim.inject(FaultKind::RcLoss, FOREVER);
+            let (label, color) = fault_pop(&FaultKind::RcLoss);
+            pops.write(FaultPop { label: label.into(), color });
         } else {
             let t = sim.t_us;
             for f in &mut sim.sc.faults {
@@ -315,35 +620,59 @@ fn input(
                     f.dur_us = t - f.at_us;
                 }
             }
+            pops.write(FaultPop { label: "LINK OK".into(), color: Color::srgb(0.4, 1.0, 0.5) });
         }
     }
     if keys.just_pressed(KeyCode::Digit2) {
         sim.inject(FaultKind::MotorDesync { motor }, 300_000);
+        let (label, color) = fault_pop(&FaultKind::MotorDesync { motor });
+        pops.write(FaultPop { label: label.into(), color });
     }
     if keys.just_pressed(KeyCode::Digit3) {
         sim.inject(FaultKind::MotorDead { motor }, FOREVER);
+        let (label, color) = fault_pop(&FaultKind::MotorDead { motor });
+        pops.write(FaultPop { label: label.into(), color });
     }
     if keys.just_pressed(KeyCode::Digit4) {
         sim.inject(FaultKind::ImuDropout, 100_000);
+        let (label, color) = fault_pop(&FaultKind::ImuDropout);
+        pops.write(FaultPop { label: label.into(), color });
     }
     if keys.just_pressed(KeyCode::Digit5) {
         sim.inject(FaultKind::ImuGarbage { p: 0.05 }, 2_000_000);
+        let (label, color) = fault_pop(&FaultKind::ImuGarbage { p: 0.05 });
+        pops.write(FaultPop { label: label.into(), color });
     }
     if keys.just_pressed(KeyCode::Digit6) {
         let a = (sim.t_us % 6283) as f32 / 1000.0;
-        sim.inject(FaultKind::WindShift { wind: FVec3::new(a.cos() * 5.0, a.sin() * 5.0, 0.0) }, 4_000_000);
+        let kind = FaultKind::WindShift { wind: FVec3::new(a.cos() * 5.0, a.sin() * 5.0, 0.0) };
+        sim.inject(kind, 4_000_000);
+        let (label, color) = fault_pop(&kind);
+        pops.write(FaultPop { label: label.into(), color });
     }
     if keys.just_pressed(KeyCode::Digit7) {
         let a = (sim.t_us % 6283) as f32 / 1000.0;
-        sim.inject(FaultKind::Kick { torque: FVec3::new(a.cos() * 0.012, a.sin() * 0.012, 0.002) }, 25_000);
+        let kind = FaultKind::Kick { torque: FVec3::new(a.cos() * 0.012, a.sin() * 0.012, 0.002) };
+        sim.inject(kind, 25_000);
+        let (label, color) = fault_pop(&kind);
+        pops.write(FaultPop { label: label.into(), color });
     }
     if keys.just_pressed(KeyCode::Digit8) {
         let b = &mut sim.world.battery;
         b.soc = (b.soc - 0.25).max(0.02);
+        pops.write(FaultPop { label: "BATTERY -25%".into(), color: Color::srgb(1.0, 0.92, 0.35) });
+        let t = sim.t_us;
+        deferred_log = Some((t, "battery drained 25%".into(), Color::srgb(1.0, 0.92, 0.35)));
     }
     if keys.just_pressed(KeyCode::Digit0) {
         sim.clear_faults();
         app.rc_loss_on = false;
+        pops.write(FaultPop { label: "CLEARED".into(), color: Color::WHITE });
+        let t = sim.t_us;
+        deferred_log = Some((t, "faults cleared".into(), Color::WHITE));
+    }
+    if let Some((t, text, color)) = deferred_log {
+        app.log(t, text, color);
     }
 
     // Sticks.
@@ -410,6 +739,19 @@ fn input(
             app.page_cam_presses = page.cam_presses;
             app.cam = if app.cam == CamMode::Fpv { app.prev_cam } else { CamMode::Fpv };
         }
+        // Auto-fault button: automatic failure injection while flying.
+        if page.fz_presses != app.page_fz_presses {
+            app.page_fz_presses = page.fz_presses;
+            app.toggle_auto_faults();
+        }
+        // Clear button: only visible while an "until cleared" fault is live.
+        if page.clr_presses != app.page_clr_presses {
+            app.page_clr_presses = page.clr_presses;
+            app.sim.clear_faults();
+            app.rc_loss_on = false;
+            pops.write(FaultPop { label: "CLEARED".into(), color: Color::WHITE });
+            app.log(app.sim.t_us, "faults cleared".into(), Color::WHITE);
+        }
     }
     if app.replay.is_none() {
         app.sim.manual = Some(app.sticks);
@@ -440,7 +782,8 @@ fn publish_to_page(app: Res<App_>) {
         blockers_text(st.blockers)
     };
     let fpv = app.cam == CamMode::Fpv;
-    let values = [k.roll, k.pitch, k.yaw, k.throttle, k.arm as u8 as f32, st.armed as u8 as f32, k.acro as u8 as f32, fpv as u8 as f32];
+    let sticky = sim.sc.faults.iter().any(|f| f.dur_us == FOREVER && f.active(sim.t_us));
+    let values = [k.roll, k.pitch, k.yaw, k.throttle, k.arm as u8 as f32, st.armed as u8 as f32, k.acro as u8 as f32, fpv as u8 as f32, app.auto_faults as u8 as f32, sticky as u8 as f32];
     page::publish(&values, &status);
 }
 
@@ -456,6 +799,8 @@ mod page {
         pub arm_presses: u32,
         pub mode_presses: u32,
         pub cam_presses: u32,
+        pub fz_presses: u32,
+        pub clr_presses: u32,
     }
 
     pub fn read_sticks() -> Option<PageSticks> {
@@ -469,6 +814,8 @@ mod page {
             arm_presses: x[8] as u32,
             mode_presses: x[9] as u32,
             cam_presses: x.get(10).copied().unwrap_or(0.0) as u32,
+            fz_presses: x.get(11).copied().unwrap_or(0.0) as u32,
+            clr_presses: x.get(12).copied().unwrap_or(0.0) as u32,
         })
     }
 
@@ -486,6 +833,8 @@ mod page {
         pub arm_presses: u32,
         pub mode_presses: u32,
         pub cam_presses: u32,
+        pub fz_presses: u32,
+        pub clr_presses: u32,
     }
     pub fn read_sticks() -> Option<PageSticks> {
         None
@@ -493,13 +842,15 @@ mod page {
     pub fn publish(_: &[f32], _: &str) {}
 }
 
-fn step_sim(time: Res<Time>, mut app: ResMut<App_>) {
+fn step_sim(time: Res<Time>, mut app: ResMut<App_>, mut pops: MessageWriter<FaultPop>) {
     if app.paused || app.sim.done() {
         return;
     }
     let dt = time.delta_secs().min(0.1) * app.time_scale;
     let target = app.sim.t_us + (dt * 1e6) as u64;
     app.sim.run_until(target);
+    app.auto_fault_tick(&mut pops);
+    app.update_combat_log();
     let pos = to_bevy(app.sim.world.body.pos);
     if app.trail.back().is_none_or(|p| p.distance(pos) > 0.05) {
         app.trail.push_back(pos);
@@ -634,6 +985,7 @@ fn draw(
         .collect();
     let src = match app.replay {
         Some(s) => format!("DST replay seed {s}\n{}", sim.sc.name.replace(',', " ")),
+        None if app.auto_faults => format!("manual flight, auto faults ({} injected)", app.auto_faults_injected),
         None => "manual flight".to_string(),
     };
     let speed = if app.paused { "PAUSED".to_string() } else { format!("{}x", app.time_scale) };

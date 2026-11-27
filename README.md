@@ -142,7 +142,7 @@ scripts/build-web.sh && scripts/serve-web.py 8080
 
 On-screen transmitter (mouse or touch, two fingers fly both sticks): Mode 2 by default, with throttle/yaw on the left and pitch/roll on the right. The **Mode 2** button switches to Mode 1, which swaps pitch and throttle; the choice is remembered. Throttle stays where you leave it; the other axes spring back to center. Each stick moves relative to where you grab it, so touching never makes it jump. **ARM** is the arm switch: grey when off, amber when on but blocked (with the reason above it), red when armed. **ANGLE/ACRO** switches flight mode. **FPV** switches to the drone's own camera, mounted on the canopy with 25° uptilt and a 90° vertical field of view, and back to the previous third-person camera. The sticks also show keyboard, gamepad, and virtual-pilot input.
 
-Keyboard: Space arms, W/S throttle, A/D yaw, arrows roll/pitch (Shift for full stick), M toggles angle/acro, C cycles cameras, H shows the keyboard help. Keys 1–8 inject faults (1 toggles RC loss). N replays DST seeds with the virtual pilot. A gamepad works too (mode 2).
+Keyboard: Space arms, W/S throttle, A/D yaw, arrows roll/pitch (Shift for full stick), M toggles angle/acro, C cycles cameras, H shows the keyboard help. Keys 1–8 inject faults (1 toggles RC loss). F or the **AUTO FAIL** button injects faults automatically while you fly: DST-style faults every few seconds, one at a time and only kinds the firmware flies through (no dead motors, no mid-air reboots), so its fault handling can be watched. Faults announce themselves with a floating damage-number label over the quad. N replays DST seeds with the virtual pilot. A gamepad works too (mode 2).
 
 ## Flashing the Mobula6
 
