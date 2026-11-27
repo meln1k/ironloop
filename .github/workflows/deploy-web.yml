@@ -54,6 +54,12 @@ jobs:
       - name: Build the wasm app
         run: scripts/build-web.sh
 
+      # Creates the Pages site on the first run if it does not exist yet
+      # (needs the pages: write permission above).
+      - name: Enable Pages
+        uses: actions/configure-pages@v5
+        with:
+          enablement: true
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3
         with:
