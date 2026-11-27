@@ -130,6 +130,10 @@ angle_tracks                   [flight] In an angle-mode stick script, roll and 
 
 ## Fly it in the browser
 
+**Live at [meln1k.github.io/ironloop](https://meln1k.github.io/ironloop/).** Every push to `main` that touches the sim, `web/`, or the build script rebuilds the wasm and publishes it to GitHub Pages (`.github/workflows/deploy-web.yml`, which reads the wasm-bindgen version to install from `Cargo.lock`).
+
+To run it locally:
+
 ```sh
 rustup target add wasm32-unknown-unknown
 cargo install wasm-bindgen-cli --version 0.2.130
@@ -151,7 +155,7 @@ dfu-util -a 0 -s 0x08000000:leave -D ironloop.bin
 
 Enter DFU by holding the BOOT pad while plugging in USB, or from IronLoop itself: disarmed, arm switch off, throttle low, yaw full left, pitch full back, roll full right, held for 2 s. SWD is unavailable on this board (SWCLK doubles as the flash chip-select). To go back to Betaflight, flash target CRAZYBEEF4DX and restore Happymodel's CLI dump.
 
-CI (`.github/workflows/ci.yml`) runs those tests and builds the board firmware with warnings as errors; `scripts/mutants.py` also counts a core change that breaks the firmware build. Hardware facts and sources for this board are in `docs/hardware/mobula6-eco-2024.md`.
+CI (`.github/workflows/ci.yml`) runs those tests and builds the board firmware with warnings as errors; `deploy-web.yml` publishes the wasm build to GitHub Pages. `scripts/mutants.py` also counts a core change that breaks the firmware build. Hardware facts and sources for this board are in `docs/hardware/mobula6-eco-2024.md`.
 
 The board gives the firmware's `Config` the gyro and accelerometer ranges it programs into the IMU; the mounting is the default CW0 for both chips, from Happymodel's factory dump. A panic, or the control loop missing the independent watchdog for about 50 ms (34–94 ms over the LSI clock's tolerance), resets the board; the ESCs stop on the missing signal, and arming afterwards needs the arm switch seen off first.
 
